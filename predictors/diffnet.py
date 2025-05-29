@@ -1528,7 +1528,7 @@ class DiffNet(pl.LightningModule):
 
     @staticmethod
     def add_model_specific_args(parent_parser):
-        parser = parent_parser.add_argument_group('QCNet')
+        parser = parent_parser.add_argument_group('DiffNet')
         parser.add_argument('--dataset', type=str, required=True)
         parser.add_argument('--input_dim', type=int, default=2)
         parser.add_argument('--hidden_dim', type=int, default=128)
