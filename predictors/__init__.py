@@ -13,5 +13,5 @@
 # limitations under the License.
 from predictors.qcnet import QCNet
 from predictors.diffnet import DiffNet
-from predictors.ucdiffnet import UcDiffNet
-from predictors.cucdiffnet import CUCDiffNet
+# from predictors.ucdiffnet import UcDiffNet
+# from predictors.cucdiffnet import CUCDiffNet
