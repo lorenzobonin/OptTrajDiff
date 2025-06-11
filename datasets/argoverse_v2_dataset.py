@@ -77,10 +77,7 @@ class ArgoverseV2Dataset(Dataset):
                  processed_dir: Optional[str] = None,
                  transform: Optional[Callable] = None,
                  dim: int = 3,
-                 num_historical_steps: int = 50,
-                 num_future_steps: int = 60,
-                 predict_unseen_agents: bool = False,
-                 vector_repr: bool = True) -> None:
+                 num_steps: int = 110) -> None:
         root = os.path.expanduser(os.path.normpath(root))
         if not os.path.isdir(root):
             os.makedirs(root)
@@ -125,11 +122,7 @@ class ArgoverseV2Dataset(Dataset):
                 self._processed_file_names = []
 
         self.dim = dim
-        self.num_historical_steps = num_historical_steps
-        self.num_future_steps = num_future_steps
-        self.num_steps = num_historical_steps + num_future_steps
-        self.predict_unseen_agents = predict_unseen_agents
-        self.vector_repr = vector_repr
+        self.num_steps = num_steps
         self._url = f'https://s3.amazonaws.com/argoverse/datasets/av2/tars/motion-forecasting/{split}.tar'
         self._num_samples = {
             'train': 199908,
@@ -207,23 +200,21 @@ class ArgoverseV2Dataset(Dataset):
         return df['city'].values[0]
 
     def get_agent_features(self, df: pd.DataFrame) -> Dict[str, Any]:
-        if not self.predict_unseen_agents:  # filter out agents that are unseen during the historical time steps
-            historical_df = df[df['timestep'] < self.num_historical_steps]
-            agent_ids = list(historical_df['track_id'].unique())
-            df = df[df['track_id'].isin(agent_ids)]
-        else:
-            agent_ids = list(df['track_id'].unique())
+        # filter out agents that are unseen at the initial time step
+        initial_df = df[df['timestep'] == 0]
+        agent_ids = list(initial_df['track_id'].unique())
+        df = df[df['track_id'].isin(agent_ids)]
 
         num_agents = len(agent_ids)
         av_idx = agent_ids.index('AV')
 
         # initialization
-        valid_mask = torch.zeros(num_agents, self.num_steps, dtype=torch.bool)
-        current_valid_mask = torch.zeros(num_agents, dtype=torch.bool)
-        predict_mask = torch.zeros(num_agents, self.num_steps, dtype=torch.bool)
-        agent_id: List[Optional[str]] = [None] * num_agents
-        agent_type = torch.zeros(num_agents, dtype=torch.uint8)
-        agent_category = torch.zeros(num_agents, dtype=torch.uint8)
+        valid_mask = torch.zeros(num_agents, self.num_steps, dtype=torch.bool) # Whether the agent is present at each timestep
+        current_valid_mask = torch.zeros(num_agents, dtype=torch.bool) # Whether the agent is valid at the last historical timestep
+        predict_mask = torch.zeros(num_agents, self.num_steps, dtype=torch.bool) # Whether the agent should be predicted at each timestep
+        agent_id: List[Optional[str]] = [None] * num_agents # List of agent identifiers
+        agent_type = torch.zeros(num_agents, dtype=torch.uint8) # Categorical encoding of object type
+        agent_category = torch.zeros(num_agents, dtype=torch.uint8) # Higher-level category (AV, etc..)
         position = torch.zeros(num_agents, self.num_steps, self.dim, dtype=torch.float)
         heading = torch.zeros(num_agents, self.num_steps, dtype=torch.float)
         velocity = torch.zeros(num_agents, self.num_steps, self.dim, dtype=torch.float)
@@ -233,16 +224,11 @@ class ArgoverseV2Dataset(Dataset):
             agent_steps = track_df['timestep'].values
 
             valid_mask[agent_idx, agent_steps] = True
-            current_valid_mask[agent_idx] = valid_mask[agent_idx, self.num_historical_steps - 1]
+            current_valid_mask[agent_idx] = valid_mask[agent_idx, 0]
             predict_mask[agent_idx, agent_steps] = True
-            if self.vector_repr:  # a time step t is valid only when both t and t-1 are valid
-                valid_mask[agent_idx, 1: self.num_historical_steps] = (
-                        valid_mask[agent_idx, :self.num_historical_steps - 1] &
-                        valid_mask[agent_idx, 1: self.num_historical_steps])
-                valid_mask[agent_idx, 0] = False
-            predict_mask[agent_idx, :self.num_historical_steps] = False
+            predict_mask[agent_idx, 0] = False
             if not current_valid_mask[agent_idx]:
-                predict_mask[agent_idx, self.num_historical_steps:] = False
+                predict_mask[agent_idx, :] = False
 
             agent_id[agent_idx] = track_id
             agent_type[agent_idx] = self._agent_types.index(track_df['object_type'].values[0])
@@ -258,7 +244,7 @@ class ArgoverseV2Dataset(Dataset):
         if self.split == 'test':
             predict_mask[current_valid_mask
                          | (agent_category == 2)
-                         | (agent_category == 3), self.num_historical_steps:] = True
+                         | (agent_category == 3), :] = True
 
         return {
             'num_nodes': num_agents,
