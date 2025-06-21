@@ -15,8 +15,8 @@ from typing import Dict, Mapping, Optional
 
 import torch
 import torch.nn as nn
-from utils import radius
-from utils import radius_graph
+from torch_cluster import radius
+from torch_cluster import radius_graph
 from torch_geometric.data import Batch
 from torch_geometric.data import HeteroData
 from torch_geometric.utils import dense_to_sparse

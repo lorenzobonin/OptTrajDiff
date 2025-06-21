@@ -25,7 +25,7 @@ from transforms import TargetBuilder
 from torch_geometric.loader import DataLoader
 
 if __name__ == '__main__':
-    pl.seed_everything(2024, workers=True)
+    pl.seed_everything(2025, workers=True)
     
     
     parser = ArgumentParser()
