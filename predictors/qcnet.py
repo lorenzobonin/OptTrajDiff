@@ -172,7 +172,7 @@ class QCNet(pl.LightningModule):
             data['agent']['av_index'] += data['agent']['ptr'][:-1]
         reg_mask = data['agent']['predict_mask'][:, self.num_historical_steps:]
         cls_mask = data['agent']['predict_mask'][:, -1]
-        pred = self(data)
+        pred, _ = self(data)
         if self.output_head:
             traj_propose = torch.cat([pred['loc_propose_pos'][..., :self.output_dim],
                                       pred['loc_propose_head'],
@@ -221,7 +221,7 @@ class QCNet(pl.LightningModule):
         
         reg_mask = data['agent']['predict_mask'][:, self.num_historical_steps:]
         cls_mask = data['agent']['predict_mask'][:, -1]
-        pred = self(data)
+        pred, _ = self(data)
         if self.output_head:
             traj_propose = torch.cat([pred['loc_propose_pos'][..., :self.output_dim],
                                       pred['loc_propose_head'],
@@ -341,7 +341,7 @@ class QCNet(pl.LightningModule):
                   batch_idx):
         if isinstance(data, Batch):
             data['agent']['av_index'] += data['agent']['ptr'][:-1]
-        pred = self(data)
+        pred, _ = self(data)
         if self.output_head:
             traj_refine = torch.cat([pred['loc_refine_pos'][..., :self.output_dim],
                                      pred['loc_refine_head'],
