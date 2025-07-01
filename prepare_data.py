@@ -20,6 +20,7 @@ from pytorch_lightning.strategies import DDPStrategy
 
 from datamodules import ArgoverseV2DataModule
 from predictors import QCNet
+import pickle
 
 if __name__ == '__main__':
     pl.seed_everything(2025, workers=True)
@@ -51,7 +52,14 @@ if __name__ == '__main__':
     }[args.dataset](**vars(args))
     model_checkpoint = ModelCheckpoint(monitor='val_minFDE', save_top_k=5, mode='min')
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
-    trainer = pl.Trainer(accelerator=args.accelerator, devices=args.devices,
-                         strategy=DDPStrategy(find_unused_parameters=False, gradient_as_bucket_view=True),
-                         callbacks=[model_checkpoint, lr_monitor], max_epochs=args.max_epochs)
-    trainer.fit(model, datamodule)
+    
+    datamodule.prepare_data()
+    datamodule.setup()
+    
+    loader = datamodule.train_dataloader()
+
+    # Get one batch
+    batch = next(iter(loader))
+
+    with open("sample_batch.pkl", "wb") as f:
+        pickle.dump(batch, f)

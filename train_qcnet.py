@@ -31,6 +31,7 @@ if __name__ == '__main__':
     parser.add_argument('--test_batch_size', type=int, required=True)
     parser.add_argument('--shuffle', type=bool, default=True)
     parser.add_argument('--num_workers', type=int, default=8)
+    parser.add_argument('--num_nodes', type=int, default=1)
     parser.add_argument('--pin_memory', type=bool, default=True)
     parser.add_argument('--persistent_workers', type=bool, default=True)
     parser.add_argument('--train_raw_dir', type=str, default=None)
@@ -44,16 +45,16 @@ if __name__ == '__main__':
     parser.add_argument('--max_epochs', type=int, default=64)
     QCNet.add_model_specific_args(parser)
     args = parser.parse_args()
-    print("Before model")
+
     model = QCNet(**vars(args))
-    print("Before data module")
+    
     datamodule = {
         'argoverse_v2': ArgoverseV2DataModule,
     }[args.dataset](**vars(args))
     model_checkpoint = ModelCheckpoint(monitor='val_minFDE', save_top_k=5, mode='min')
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
-    print("Before trainer")
-    trainer = pl.Trainer(accelerator=args.accelerator, devices=args.devices,
+    
+    trainer = pl.Trainer(accelerator=args.accelerator, devices=args.devices, num_nodes=args.num_nodes,
                          strategy=DDPStrategy(find_unused_parameters=False, gradient_as_bucket_view=True),
                          callbacks=[model_checkpoint, lr_monitor], max_epochs=args.max_epochs)
     trainer.fit(model, datamodule)
