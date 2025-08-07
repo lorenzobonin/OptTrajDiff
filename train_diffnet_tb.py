@@ -44,7 +44,8 @@ if __name__ == '__main__':
     parser.add_argument('--val_processed_dir', type=str, default=None)
     parser.add_argument('--test_processed_dir', type=str, default=None)
     parser.add_argument('--accelerator', type=str, default='auto')
-    parser.add_argument('--devices', type=str, default="1")
+    parser.add_argument('--devices', type=int, required=True)
+    parser.add_argument('--num_nodes', type=int, default=1)
     parser.add_argument('--max_epochs', type=int, default=64)
     parser.add_argument('--check_val_every_n_epoch', type=int, default=1)
     
@@ -89,6 +90,7 @@ if __name__ == '__main__':
     trainer = pl.Trainer(accelerator=args.accelerator, 
                         #  inference_mode=False,
                          devices=args.devices, # args.devices
+                         num_nodes=args.num_nodes,
                          strategy=DDPStrategy(find_unused_parameters=True, gradient_as_bucket_view=True), # 'ddp_find_unused_parameters_true' false
                          callbacks=[model_checkpoint, lr_monitor], max_epochs=args.max_epochs, 
                          check_val_every_n_epoch=args.check_val_every_n_epoch,

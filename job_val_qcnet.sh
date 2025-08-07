@@ -14,4 +14,4 @@ conda activate scengen
 module load gcc/12.2.0
 export LD_LIBRARY_PATH=/leonardo/home/userexternal/lbonin00/micromamba/envs/scengen/lib:$LD_LIBRARY_PATH
 
-srun python val_qcnet.py --model QCNet --root /leonardo_scratch/large/userexternal/lbonin00/argoverse/argoverse_data/ --ckpt_path /leonardo/home/userexternal/lbonin00/repos/OptTrajDiff/lightning_logs/version_2/checkpoints/epoch=40-step=256168.ckpt
+srun python val_qcnet.py --model QCNet --root /leonardo_scratch/large/userexternal/lbonin00/argoverse/argoverse_data/ --ckpt_path /leonardo/home/userexternal/lbonin00/repos/OptTrajDiff/lightning_logs/QCNet_AV2.ckpt
