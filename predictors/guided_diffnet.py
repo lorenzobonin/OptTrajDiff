@@ -181,7 +181,7 @@ class GuidedDiffNet(DiffNet):
         mean = marginal_mode.mean(dim=1)
 
         self.joint_diffusion.eval()
-        num_samples = self.num_eval_samples
+        num_samples = 1
 
         reverse_steps = 70
         
@@ -193,7 +193,7 @@ class GuidedDiffNet(DiffNet):
                                                 eval_mask=eval_mask)
         
         pred_modes = self.unnormalize(pred_modes,self.latent_mean, self.latent_std)
-        rec_traj = torch.matmul(pred_modes.permute(1,0,2), (self.V_k).unsqueeze(0).repeat(self.num_eval_samples,1,1)) + self.s_mean.unsqueeze(0)
+        rec_traj = torch.matmul(pred_modes.permute(1,0,2), (self.V_k).unsqueeze(0).repeat(num_samples,1,1)) + self.s_mean.unsqueeze(0)
         rec_traj = rec_traj.permute(1,0,2)
         rec_traj = rec_traj.view(rec_traj.size(0), rec_traj.size(1),self.num_future_steps,2)
 

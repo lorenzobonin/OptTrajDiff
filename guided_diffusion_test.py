@@ -2,6 +2,7 @@ from argparse import ArgumentParser
 
 import pytorch_lightning as pl
 from torch_geometric.loader import DataLoader
+from torch_geometric.data import Batch
 
 from datasets import ArgoverseV2Dataset
 from predictors.guided_diffnet import GuidedDiffNet
@@ -70,18 +71,28 @@ if __name__ == '__main__':
     dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
                             pin_memory=args.pin_memory, persistent_workers=args.persistent_workers)
 
+    iterator = iter(dataloader)
+    data_batch = next(iterator)
 
-    data_batch = next(iter(dataloader))
+    # Extract just the first graph from the batch
+    first_graph = data_batch.to_data_list()[0]
+
+    # Turn it back into a HeteroDataBatch object (the only one working)
+    data_batch = Batch.from_data_list([first_graph])
+    print(data_batch)
+
     model.cond_data = data_batch
     
-    print(data_batch)
-    # getting an input with the right dimensionality
-    num_agents = 30
-    num_dim = 10
+    data_list = data_batch.to_data_list()   # Converts the batch into a list of HeteroData objects
+    single_graph = data_list[0]
+     
+    # Getting an input with the right dimensionality
+    num_agents = 3 # Number of predictable trajectories in the batch
+    num_dim = 10 # Latent dim
     x_T = torch.randn([num_agents, 1, num_dim])
     pred = model.latent_generator(x_T)
 
-    print(pred.size())
+    print(pred.size()) # [num_agents x samples x timesteps x output_dim (2D position)]
     
     
     
