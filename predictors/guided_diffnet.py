@@ -108,7 +108,7 @@ class GuidedDiffNet(DiffNet):
     @classmethod
     def from_pretrained(cls, checkpoint_path, cond_data=None):
         # Load base model
-        guided_model = cls.load_from_checkpoint(checkpoint_path, cond_data=cond_data)
+        guided_model = cls.load_from_checkpoint(checkpoint_path, qcnet_ckpt_path=qcnet_ckpt_path, cond_data=cond_data)
 
         #guided_model = cls(cond_data)
         #guided_model.load_state_dict(base_model.state_dict(), strict=False)

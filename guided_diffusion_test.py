@@ -22,6 +22,7 @@ if __name__ == '__main__':
     parser.add_argument('--accelerator', type=str, default='auto')
     parser.add_argument('--devices', type=str, default="4,")
     parser.add_argument('--ckpt_path', type=str, required=True)
+    parser.add_argument('--qcnet_ckpt_path', type=str, required=True)
     parser.add_argument('--sampling', choices=['ddpm','ddim'],default='ddpm')
     parser.add_argument('--sampling_stride', type = int, default = 20)
     parser.add_argument('--num_eval_samples', type = int, default = 6)
@@ -52,7 +53,7 @@ if __name__ == '__main__':
 
     model = {
         'GuidedDiffNet': GuidedDiffNet,
-    }['GuidedDiffNet'].from_pretrained(checkpoint_path=args.ckpt_path)
+    }['GuidedDiffNet'].from_pretrained(checkpoint_path=args.ckpt_path, qcnet_ckpt_path=args.qcnet_ckpt_path)
     
     model.add_extra_param(args)
     
