@@ -66,7 +66,9 @@ if __name__ == '__main__':
     parser.add_argument('--cond_norm', type = int, default = 0)
     parser.add_argument('--cost_param_costl', type = float, default = 1.0)
     parser.add_argument('--cost_param_threl', type = float, default = 1.0)
-    
+
+    parser.add_argument('--resume_from_ckpt', type=str, default=None,
+                    help="Path to checkpoint file to resume training from")
     
     
     
@@ -95,6 +97,7 @@ if __name__ == '__main__':
                          callbacks=[model_checkpoint, lr_monitor], max_epochs=args.max_epochs, 
                          check_val_every_n_epoch=args.check_val_every_n_epoch,
                          num_sanity_val_steps = 1) #gradient_clip_val=1
-    trainer.fit(model, datamodule)
+    
+    trainer.fit(model, datamodule, ckpt_path=args.resume_from_ckpt)
     
 
