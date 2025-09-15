@@ -7,6 +7,13 @@ from typing import Dict, List, Mapping, Optional
 import copy
 import numpy as np
 import time
+
+from visualization import *
+from av2.datasets.motion_forecasting import scenario_serialization
+from av2.map.map_api import ArgoverseStaticMap
+
+import os
+from pathlib import Path
 # from pynvml import *
 # nvmlInit()
 
@@ -20,6 +27,7 @@ class GuidedJointDiffusion(JointDiffusion):
                data: HeteroData,
                scene_enc: Mapping[str, torch.Tensor],
                mean = None,
+               std = None,
                mm = None,
                mmscore = None,
                if_output_diffusion_process = False,
@@ -35,8 +43,16 @@ class GuidedJointDiffusion(JointDiffusion):
         num_samples = 1
         
         device = mean.device
-
         num_agents = mean.size(0)
+
+        mean = mean.unsqueeze(1)
+        std = std.unsqueeze(1)
+
+        x_T = x_T * std
+        s_T = torch.sqrt(self.var_sched.alpha_bars[reverse_steps].to(device)) * mean
+        
+        c1 = 1
+        x_T = c1 * x_T + s_T
         
         x_t_list = [x_T]
         torch.cuda.empty_cache()
@@ -46,6 +62,7 @@ class GuidedJointDiffusion(JointDiffusion):
         # pu = info.used/ (1024 ** 3)
         for t in range(reverse_steps, 0, -stride):
 
+            z = torch.randn_like(x_T) * std if t > 1 else torch.zeros_like(x_T)
             beta = self.var_sched.betas[t]
             alpha = self.var_sched.alphas[t]
             alpha_bar = self.var_sched.alpha_bars[t]
@@ -97,18 +114,23 @@ class GuidedJointDiffusion(JointDiffusion):
  
         
 class GuidedDiffNet(DiffNet):
-    def __init__(self, *args, cond_data=None, **kwargs):
+    def __init__(self, *args, cond_data=None, data_path=None, **kwargs):
         super().__init__(*args, **kwargs)
         self._cond_data = cond_data
+        self._data_path = data_path
 
     @property
     def cond_data(self):
         return self._cond_data
 
+    @property
+    def data_path(self):
+        return self._data_path
+
     @classmethod
-    def from_pretrained(cls, checkpoint_path, cond_data=None):
+    def from_pretrained(cls, checkpoint_path, cond_data=None, data_path=None):
         # Load base model
-        guided_model = cls.load_from_checkpoint(checkpoint_path, qcnet_ckpt_path=qcnet_ckpt_path, cond_data=cond_data)
+        guided_model = cls.load_from_checkpoint(checkpoint_path, cond_data=cond_data, data_path=data_path)
 
         #guided_model = cls(cond_data)
         #guided_model.load_state_dict(base_model.state_dict(), strict=False)
@@ -120,32 +142,20 @@ class GuidedDiffNet(DiffNet):
     def cond_data(self, value):
         self._cond_data = value
 
-    def latent_generator(self, latent_point):
-        if self.cond_data is None:
-            raise RuntimeError("cond_data must be set before calling latent_generator().")
+    def plot_predictions(
+        self,
+        b_idx,
+        data,
+        eval_mask,
+        traj_refine,
+        rec_traj,
+        gt_eval,
+        goal_point,
+        num_scenes,
+        num_agents_per_scene,
+    ):
+        """Handles only the plotting/visualization logic for latent_generator."""
 
-        data = self.cond_data.to(self.device)
-        if isinstance(data, Batch):
-            data['agent']['av_index'] += data['agent']['ptr'][:-1]
-        
-        pred, scene_enc = self.qcnet(data)
-        
-        if self.output_head:
-            traj_refine = torch.cat([pred['loc_refine_pos'][..., :self.output_dim],
-                                     pred['loc_refine_head'],
-                                     pred['scale_refine_pos'][..., :self.output_dim],
-                                     pred['conc_refine_head']], dim=-1)
-        else:
-            traj_refine = torch.cat([pred['loc_refine_pos'][..., :self.output_dim],
-                                     pred['scale_refine_pos'][..., :self.output_dim]], dim=-1)
-        device = traj_refine.device
-        pi = pred['pi']
-
-        if self.dataset == 'argoverse_v2':
-            eval_mask = data['agent']['category'] >= 2
-        else:
-            raise ValueError('{} is not a valid dataset'.format(self.dataset))
-        
         origin_eval = data['agent']['position'][eval_mask, self.num_historical_steps - 1]
         theta_eval = data['agent']['heading'][eval_mask, self.num_historical_steps - 1]
         cos, sin = theta_eval.cos(), theta_eval.sin()
@@ -154,48 +164,221 @@ class GuidedDiffNet(DiffNet):
         rot_mat[:, 0, 1] = sin
         rot_mat[:, 1, 0] = -sin
         rot_mat[:, 1, 1] = cos
-        traj_eval = torch.matmul(traj_refine[eval_mask, :, :, :2],
-                                 rot_mat.unsqueeze(1)) + origin_eval[:, :2].reshape(-1, 1, 1, 2)
+
+        rec_traj_world = torch.matmul(rec_traj[:, :, :, :2],
+                                    rot_mat.unsqueeze(1)) + origin_eval[:, :2].reshape(-1, 1, 1, 2)
+
+        marginal_trajs = traj_refine[eval_mask, :, :, :2]
+        marg_traj_world = torch.matmul(marginal_trajs,
+                                    rot_mat.unsqueeze(1)) + origin_eval[:, :2].reshape(-1, 1, 1, 2)
+        marg_traj_world = marg_traj_world.detach().cpu().numpy()
+
+        gt_eval_world = torch.matmul(gt_eval[:, :, :2], rot_mat) + origin_eval[:, :2].reshape(-1, 1, 2)
+        gt_eval_world = gt_eval_world.detach().cpu().numpy()
+
+        goal_point_world = torch.matmul(goal_point[:, None, None, :],
+                                        rot_mat.unsqueeze(1)) + origin_eval[:, :2].reshape(-1, 1, 1, 2)
+        goal_point_world = goal_point_world.squeeze(1).squeeze(1).detach().cpu().numpy()
+
+        img_folder = 'visual'
+        sub_folder = 'opd_method'
+        rec_traj_world_np = rec_traj_world.detach().cpu().numpy()
+
+        for i in range(num_scenes):
+            start_id = torch.sum(num_agents_per_scene[:i])
+            end_id = torch.sum(num_agents_per_scene[:i+1])
+
+            if end_id - start_id == 1:
+                print(f"Not plotting scenario {b_idx} because it has just one agent")
+                continue
+
+            temp = gt_eval[start_id:end_id]
+            temp_start = temp[:, 0, :]
+            temp_end = temp[:, -1, :]
+            norm = torch.norm(temp_end - temp_start, dim=-1)
+
+            if torch.max(norm) < 10:
+                print(f"Not plotting scenario {b_idx} because agents didn't move")
+                continue
+
+            scenario_id = data['scenario_id'][i]
+            print(f"Plotting scenario {b_idx}")
+
+            base_path_to_data = Path(os.path.join(self.data_path, "raw"))
+            scenario_folder = base_path_to_data / scenario_id
+
+            static_map_path = scenario_folder / f"log_map_archive_{scenario_id}.json"
+            scenario_path = scenario_folder / f"scenario_{scenario_id}.parquet"
+
+            scenario = scenario_serialization.load_argoverse_scenario_parquet(scenario_path)
+            static_map = ArgoverseStaticMap.from_json(static_map_path)
+
+            viz_output_dir = Path(img_folder) / sub_folder
+            os.makedirs(viz_output_dir, exist_ok=True)
+
+            viz_save_path = viz_output_dir / (f'viz_{b_idx}.jpg')
+
+            additional_traj = {
+                'gt': gt_eval_world[start_id:end_id],
+                'goal_point': goal_point_world,
+                'marg_traj': marg_traj_world[start_id:end_id],
+                'rec_traj': rec_traj_world_np[start_id:end_id],
+            }
+
+            traj_visible = {
+                'gt': True,
+                'gt_goal': False,
+                'goal_point': False,
+                'marg_traj': False,
+                'rec_traj': True,
+            }
+
+            visualize_scenario_prediction(scenario, static_map, additional_traj, traj_visible, viz_save_path)
+
+    
+
+    def latent_generator(self, latent_point, b_idx, plot=False):
+
+        if self.cond_data is None:
+            raise RuntimeError("cond_data must be set before calling latent_generator().")
+
+        data = self.cond_data.to(self.device)
+        
+        if isinstance(data, Batch):
+            data['agent']['av_index'] += data['agent']['ptr'][:-1]
+        
+        reg_mask = data['agent']['predict_mask'][:, self.num_historical_steps:]
+        pred, scene_enc = self.qcnet(data)
+        if self.output_head:
+            traj_refine = torch.cat([pred['loc_refine_pos'][..., :self.output_dim],
+                                    pred['loc_refine_head'],
+                                    pred['scale_refine_pos'][..., :self.output_dim],
+                                    pred['conc_refine_head']], dim=-1)
+        else:
+            traj_refine = torch.cat([pred['loc_refine_pos'][..., :self.output_dim],
+                                    pred['scale_refine_pos'][..., :self.output_dim]], dim=-1)
+        pi = pred['pi']
+        gt = torch.cat([data['agent']['target'][..., :self.output_dim], data['agent']['target'][..., -1:]], dim=-1)
+        l2_norm = (torch.norm(traj_refine[..., :self.output_dim] -
+                            gt[..., :self.output_dim].unsqueeze(1), p=2, dim=-1) * reg_mask.unsqueeze(1)).sum(dim=-1)
         
         if self.s_mean == None:
             s_mean = np.load(self.path_pca_s_mean)
-            self.s_mean = torch.tensor(s_mean).to(device)
+            self.s_mean = torch.tensor(s_mean).to(gt.device)
             VT_k = np.load(self.path_pca_VT_k)
-            self.VT_k = torch.tensor(VT_k).to(device)
+            self.VT_k = torch.tensor(VT_k).to(gt.device)
             if self.path_pca_V_k != 'none':
                 V_k = np.load(self.path_pca_V_k)
-                self.V_k = torch.tensor(V_k).to(device)
+                self.V_k = torch.tensor(V_k).to(gt.device)
             else:
                 self.V_k = self.VT_k.transpose(0,1)
             latent_mean = np.load(self.path_pca_latent_mean)
-            self.latent_mean = torch.tensor(latent_mean).to(device)
+            self.latent_mean = torch.tensor(latent_mean).to(gt.device)
             latent_std = np.load(self.path_pca_latent_std) * 2
-            self.latent_std = torch.tensor(latent_std).to(device)
+            self.latent_std = torch.tensor(latent_std).to(gt.device)
+        
+        
+        eval_mask = data['agent']['category'] >= 2
+        
+        mask = (data['agent']['category'] >= 2) & (reg_mask[:,-1] == True) & (reg_mask[:,0] == True)
+        gt_n = gt[mask][..., :self.output_dim]
+        gt_n[0,:,:] = (gt_n[0,:,:] - gt_n[0,0:1,:]) / 4 * 3 + gt_n[0,0:1,:]
+        reg_mask_n = reg_mask[mask]
+        num_agent = gt_n.size(0)
+        reg_start_list = []
+        reg_end_list = []
+        for i in range(num_agent):
+            start = []
+            end = []
+            for j in range(59):
+                if reg_mask_n[i,j] == True and reg_mask_n[i,j+1] == False:
+                    start.append(j)
+                elif reg_mask_n[i,j] == False and reg_mask_n[i,j+1] == True:
+                    end.append(j+1)
+            reg_start_list.append(start)
+            reg_end_list.append(end)
             
+        for i in range(num_agent):
+            count = 0
+            for j in range(59):
+                if reg_mask_n[i,j] == False:
+                    start_id = reg_start_list[i][count]
+                    end_id = reg_end_list[i][count]
+                    start_pt = gt_n[i, start_id]
+                    end_pt = gt_n[i, end_id]
+                    gt_n[i,j] = start_pt + (end_pt - start_pt) / (end_id - start_id) * (j-start_id)
+                    if j == end_id - 1:
+                        count += 1
+        
+        flat_gt = gt_n.reshape(gt_n.size(0),-1)
+        k_vector = torch.matmul(flat_gt-self.s_mean, self.VT_k)
+        rec_flat_gt = torch.matmul(k_vector, self.V_k) + self.s_mean
+        rec_gt = rec_flat_gt.view(-1,60,2)
+        
+        target_mode = torch.matmul(flat_gt-self.s_mean, self.VT_k)
+        target_mode = self.normalize(target_mode, self.latent_mean, self.latent_std)
+        
+        # fde is valid for all eval agent
+        fde_marginal_gt = torch.norm(traj_refine[:,:,-1,:2] - gt[:,-1,:2].unsqueeze(1),dim=-1)
+
+        # [num_agents,] index of best mode
+        if self.choose_best_mode == 'FDE':
+            best_fde_mode = fde_marginal_gt.argmin(dim=-1)
+            best_l2_mode = l2_norm.argmin(dim=-1)
+            best_mode = best_l2_mode
+            fde_valid = reg_mask[:,-1]==True
+            best_mode[fde_valid] = best_fde_mode[fde_valid]
+        elif self.choose_best_mode == 'ADE':
+            best_l2_mode = l2_norm.argmin(dim=-1)
+            best_mode = best_l2_mode
+
+        if self.dataset == 'argoverse_v2':
+            eval_mask = data['agent']['category'] >= 2
+        else:
+            raise ValueError('{} is not a valid dataset'.format(self.dataset))
+        valid_mask_eval = reg_mask[eval_mask]
+
+        gt_eval = gt[eval_mask]
+    
         marginal_trajs = traj_refine[eval_mask,:,:,:2]
         marginal_trajs = marginal_trajs.view(marginal_trajs.size(0),self.num_modes,-1)
         marginal_mode = torch.matmul((marginal_trajs-self.s_mean.unsqueeze(1)).permute(1,0,2), self.VT_k.unsqueeze(0).repeat(self.num_modes,1,1))
         marginal_mode = marginal_mode.permute(1,0,2)
         marginal_mode = self.normalize(marginal_mode, self.latent_mean, self.latent_std)
- 
-        mean = marginal_mode.mean(dim=1)
+        marg_mean = marginal_mode.mean(dim=1)
+        marg_std = marginal_mode.std(dim=1) + self.std_reg
+
+
+        if self.cond_norm:
+            marginal_mode = self.normalize(marginal_mode, marg_mean, marg_std)
+            target_mode = self.normalize(target_mode, marg_mean, marg_std)
+
+            mean = torch.zeros_like(marg_mean)
+            std = torch.ones_like(marg_std)
+        else:
+            mean = marg_mean
+            std = marg_std
 
         self.joint_diffusion.eval()
         num_samples = 1
+        reverse_steps = None
+        device = traj_refine.device
 
-        reverse_steps = 70
+        pred_modes = self.joint_diffusion.from_latent(latent_point.to(device), data=data, scene_enc=scene_enc,
+                                                    mean=mean, std=std, mm=marginal_mode,
+                                                    mmscore=pi.exp()[eval_mask],
+                                                    stride=self.sampling_stride,
+                                                    reverse_steps=reverse_steps,
+                                                    eval_mask=eval_mask)
         
-        pred_modes = self.joint_diffusion.from_latent(latent_point.to(device), data = data, scene_enc = scene_enc, 
-                                                mean = mean, mm = marginal_mode, 
-                                                mmscore = pi.exp()[eval_mask],
-                                                stride=self.sampling_stride,
-                                                reverse_steps=reverse_steps,
-                                                eval_mask=eval_mask)
-        
-        pred_modes = self.unnormalize(pred_modes,self.latent_mean, self.latent_std)
-        rec_traj = torch.matmul(pred_modes.permute(1,0,2), (self.V_k).unsqueeze(0).repeat(num_samples,1,1)) + self.s_mean.unsqueeze(0)
+        if self.cond_norm:
+            pred_modes = self.unnormalize(pred_modes, marg_mean, marg_std)
+
+        unnorm_pred_modes = self.unnormalize(pred_modes,self.latent_mean, self.latent_std)
+        rec_traj = torch.matmul(unnorm_pred_modes.permute(1,0,2), (self.V_k).unsqueeze(0).repeat(1,num_samples,1)) + self.s_mean.unsqueeze(0)
         rec_traj = rec_traj.permute(1,0,2)
         rec_traj = rec_traj.view(rec_traj.size(0), rec_traj.size(1),self.num_future_steps,2)
+        
 
         origin_eval = data['agent']['position'][eval_mask, self.num_historical_steps - 1]
         theta_eval = data['agent']['heading'][eval_mask, self.num_historical_steps - 1]
@@ -207,5 +390,24 @@ class GuidedDiffNet(DiffNet):
         rot_mat[:, 1, 1] = cos
         rec_traj_world = torch.matmul(rec_traj[:, :, :, :2],
                                 rot_mat.unsqueeze(1)) + origin_eval[:, :2].reshape(-1, 1, 1, 2)
+        
+        goal_point = gt_eval[:, -1, :2].detach().clone()
+        batch_idx = data['agent']['batch'][eval_mask]
+        num_scenes = batch_idx[-1].item() + 1
 
-        return rec_traj_world
+        num_agents_per_scene = torch.bincount(batch_idx, minlength=batch_idx.max().item() + 1)
+
+        if plot:
+            self.plot_predictions(
+            b_idx=b_idx,
+            data=data,
+            eval_mask=eval_mask,
+            traj_refine=traj_refine,
+            rec_traj=rec_traj,
+            gt_eval=gt_eval,
+            goal_point=goal_point,
+            num_scenes=num_scenes,
+            num_agents_per_scene=num_agents_per_scene,
+        )
+                
+        return rec_traj_world.squeeze(1)

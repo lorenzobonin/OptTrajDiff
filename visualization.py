@@ -138,8 +138,8 @@ def visualize_scenario_prediction(
                 
     if traj_visible['marg_traj']:
         marg_traj = additional_traj['marg_traj']
-        if k in special_set:
-            for k in range(marg_traj.shape[0]):
+        for k in range(marg_traj.shape[0]):
+            if k in special_set:
                 for i in range(marg_traj.shape[1]):
                     plt.plot(marg_traj[k,i,:,0],marg_traj[k,i,:,1],color = 'b',linewidth = 2,alpha = 0.5, zorder = 1000)
         else:

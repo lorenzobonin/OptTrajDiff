@@ -9,9 +9,36 @@ from predictors.guided_diffnet import GuidedDiffNet
 from transforms import TargetBuilder
 import os
 import torch
+import matplotlib.pyplot as plt
+
+def plot_trajectories(trajectories, filename="trajectories.png"):
+    """
+    trajectories: tensor [num_agents, samples, timesteps, 2]
+    """
+    if isinstance(trajectories, torch.Tensor):
+        trajectories = trajectories.cpu().numpy()
+    
+    num_agents, num_samples, _, _ = trajectories.shape
+    
+    plt.figure(figsize=(6, 6))
+    
+    for agent in range(num_agents):
+        for sample in range(num_samples):
+            traj = trajectories[agent, sample]  # shape [timesteps, 2]
+            x, y = traj[:, 0], traj[:, 1]
+            plt.plot(x, y, linewidth=1, alpha=0.7)
+    
+    plt.xlabel("X")
+    plt.ylabel("Y")
+    plt.title("2D Trajectories")
+    plt.axis("equal")
+    plt.grid(True)
+    
+    plt.savefig(filename, dpi=300, bbox_inches="tight")
+    plt.close()
 
 if __name__ == '__main__':
-    pl.seed_everything(2023, workers=True)
+    pl.seed_everything(2025, workers=True)
 
     parser = ArgumentParser()
     parser.add_argument('--root', type=str, required=True)
@@ -22,7 +49,6 @@ if __name__ == '__main__':
     parser.add_argument('--accelerator', type=str, default='auto')
     parser.add_argument('--devices', type=str, default="4,")
     parser.add_argument('--ckpt_path', type=str, required=True)
-    parser.add_argument('--qcnet_ckpt_path', type=str, required=True)
     parser.add_argument('--sampling', choices=['ddpm','ddim'],default='ddpm')
     parser.add_argument('--sampling_stride', type = int, default = 20)
     parser.add_argument('--num_eval_samples', type = int, default = 6)
@@ -51,9 +77,11 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
 
+    split='val'
+
     model = {
         'GuidedDiffNet': GuidedDiffNet,
-    }['GuidedDiffNet'].from_pretrained(checkpoint_path=args.ckpt_path, qcnet_ckpt_path=args.qcnet_ckpt_path)
+    }['GuidedDiffNet'].from_pretrained(checkpoint_path=args.ckpt_path, data_path = os.path.join(args.root, split))
     
     model.add_extra_param(args)
     
@@ -66,7 +94,7 @@ if __name__ == '__main__':
 
     test_dataset = {
         'argoverse_v2': ArgoverseV2Dataset,
-    }[model.dataset](root=args.root, split='test',
+    }[model.dataset](root=args.root, split=split,
                      transform=TargetBuilder(model.num_historical_steps, model.num_future_steps))
     
     dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
@@ -75,25 +103,22 @@ if __name__ == '__main__':
     iterator = iter(dataloader)
     data_batch = next(iterator)
 
-    # Extract just the first graph from the batch
-    first_graph = data_batch.to_data_list()[0]
+    i = 5 # select scenario in the batch
+    
+    first_graph = data_batch.to_data_list()[i]
 
     # Turn it back into a HeteroDataBatch object (the only one working)
-    data_batch = Batch.from_data_list([first_graph])
-    print(data_batch)
+    first_graph = Batch.from_data_list([first_graph])
 
-    model.cond_data = data_batch
+    model.cond_data = first_graph
     
-    data_list = data_batch.to_data_list()   # Converts the batch into a list of HeteroData objects
-    single_graph = data_list[0]
-     
     # Getting an input with the right dimensionality
-    num_agents = 3 # Number of predictable trajectories in the batch
+    num_agents = 5 # Number of predictable trajectories in the batch
     num_dim = 10 # Latent dim
     x_T = torch.randn([num_agents, 1, num_dim])
-    pred = model.latent_generator(x_T)
+    pred = model.latent_generator(x_T, i, plot=True)
 
     print(pred.size()) # [num_agents x samples x timesteps x output_dim (2D position)]
-    
-    
-    
+            
+            
+        

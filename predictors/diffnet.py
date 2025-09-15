@@ -753,8 +753,9 @@ class DiffNet(pl.LightningModule):
         
         goal_point = gt_eval[:,-1,:2]
         
-        plot = False
+        plot = True
         if plot:
+            print("Plotting")
             origin_eval = data['agent']['position'][eval_mask, self.num_historical_steps - 1]
             theta_eval = data['agent']['heading'][eval_mask, self.num_historical_steps - 1]
             cos, sin = theta_eval.cos(), theta_eval.sin()
@@ -831,7 +832,7 @@ class DiffNet(pl.LightningModule):
                     continue
             
                 scenario_id = data['scenario_id'][i]
-                base_path_to_data = Path('/mnt/hdd1/trajectory_prediction/qcnet/val/raw')
+                base_path_to_data = Path('/leonardo_scratch/fast/IscrC_ADGA/argoverse_data/val/raw')
                 scenario_folder = base_path_to_data / scenario_id
                 
                 static_map_path = scenario_folder / f"log_map_archive_{scenario_id}.json"
@@ -892,8 +893,6 @@ class DiffNet(pl.LightningModule):
                     additional_traj['rec_traj'] = random_kernel_traj_world[start_id:end_id]
                     viz_save_path = viz_output_dir / ('b'+ str(data_batch)+'_s'+str(i)+'_'+self.sampling+'_'+'random_kernel'+'.jpg')
                     visualize_scenario_prediction(scenario, static_map, additional_traj, traj_visible, viz_save_path)
-
-
 
 
     def validation_step_guid(self,
@@ -1173,7 +1172,7 @@ class DiffNet(pl.LightningModule):
                 end_id = torch.sum(num_agents_per_scene[:i+1])
             
                 scenario_id = data['scenario_id'][i]
-                base_path_to_data = Path('/mnt/hdd1/trajectory_prediction/qcnet/val/raw')
+                base_path_to_data = Path('/leonardo_scratch/fast/IscrC_ADGA/argoverse_data/val/raw')
                 scenario_folder = base_path_to_data / scenario_id
                 
                 static_map_path = scenario_folder / f"log_map_archive_{scenario_id}.json"
