@@ -11,6 +11,23 @@ import os
 import torch
 import matplotlib.pyplot as plt
 
+import strel_utils as su
+
+import copy
+
+
+
+
+
+
+
+
+def softmax_max(x, dim, temp=10.0):
+    # higher temp → closer to hard max
+    weights = torch.softmax(x * temp, dim=dim)
+    return (x * weights).sum(dim=dim)
+
+
 def plot_trajectories(trajectories, filename="trajectories.png"):
     """
     trajectories: tensor [num_agents, samples, timesteps, 2]
@@ -37,8 +54,42 @@ def plot_trajectories(trajectories, filename="trajectories.png"):
     plt.savefig(filename, dpi=300, bbox_inches="tight")
     plt.close()
 
+class GenFromLatent(pl.LightningModule):
+    def __init__(self, model, scen_id):
+        super().__init__()
+        self.model = model
+        self.scen_id = scen_id
+
+        #insert STREL here if needed
+
+    
+
+    def forward(self, x_T):
+        # Ask for fused world + differentiable pieces
+        out = self.model.latent_generator(
+            x_T,
+            self.scen_id,
+            plot=False,
+            enable_grads=True,
+            return_pred_only=True
+        )
+
+    
+        #full_world, pred_eval_local, mask_eval = out
+
+        full_world = out
+        
+        # Robustness over the whole fused world trajectory
+        #robustness = su.toy_safety_function(full_world, min_dist=2.0)
+        robustness = su.evaluate_reach_property(full_world, left_label=1, right_label=1, threshold_1=3.0, threshold_2=3.0)
+        return robustness
+
+
+
+        #return self.model.latent_generator(x_T, self.scen_id, plot=False, enable_grads=True, return_pred_only=False)
+
 if __name__ == '__main__':
-    pl.seed_everything(2025, workers=True)
+    pl.seed_everything(2012, workers=True)
 
     parser = ArgumentParser()
     parser.add_argument('--root', type=str, required=True)
@@ -111,14 +162,44 @@ if __name__ == '__main__':
     first_graph = Batch.from_data_list([first_graph])
 
     model.cond_data = first_graph
+
     
+    
+
     # Getting an input with the right dimensionality
     num_agents = 5 # Number of predictable trajectories in the batch
     num_dim = 10 # Latent dim
     x_T = torch.randn([num_agents, 1, num_dim])
-    pred = model.latent_generator(x_T, i, plot=True)
+    
+    full_world,_,_ = model.latent_generator(x_T, i, plot=False, enable_grads=True, return_pred_only=False)
+    print("traj requires grad:", full_world.requires_grad)
+    print("traj grad_fn:", full_world.grad_fn)
 
-    print(pred.size()) # [num_agents x samples x timesteps x output_dim (2D position)]
+    print('only pred size is ', model.latent_generator(x_T, i, plot=False, enable_grads=True, return_pred_only=True).size())
+    print('full pred size is ', full_world.size())
+    print('full traj size is', model.cond_data['agent']['predict_mask'].size())
+    
+
+
+    
+    gen_model = GenFromLatent(model, i)
+    gen_model.eval()
+    #pred = model.latent_generator(x_T, i, plot=True)
+    z_param = torch.nn.Parameter(x_T.clone())
+    robust = gen_model(z_param)
+    print("robust.requires_grad:", robust.requires_grad)  # should be True
+
+    g = torch.autograd.grad(robust, z_param, retain_graph=True, allow_unused=True)[0]
+    print("‖grad‖:", 0.0 if g is None else g.detach().abs().max().item())
+
+    z_opt = su.grad_ascent_opt(qmodel = gen_model, z0 = x_T, lr=0.01, tol=1e-12)
+
+    print("Initial latent point:", x_T)
+    print("Optimal latent point:", z_opt)
+    
+
+    print(robust.size()) # [num_agents x samples x timesteps x output_dim (2D position)]
             
             
-        
+    #print(model.cond_data['agent']['predict_mask'].sum()) # should be equal to num_agents
+    #print(model.cond_data['agent']['valid_mask'].sum())

@@ -1,4 +1,6 @@
 __pycache__/
 lightning_logs/
 /*.out
+/*.sh
+/*.yml
 visual/
