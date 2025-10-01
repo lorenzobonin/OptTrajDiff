@@ -4,11 +4,12 @@
 import io
 import math
 from pathlib import Path
-from typing import Final, List, Optional, Sequence, Set, Tuple
+from typing import Final, List, Optional, Sequence, Set, Tuple, Dict
 
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+import matplotlib.patches as mpatches
 from matplotlib.patches import Rectangle
 from PIL import Image as img
 from PIL.Image import Image
@@ -29,6 +30,8 @@ _PRED_DURATION_TIMESTEPS: Final[int] = 60
 
 _ESTIMATED_VEHICLE_LENGTH_M: Final[float] = 4.0
 _ESTIMATED_VEHICLE_WIDTH_M: Final[float] = 2.0
+_ESTIMATED_BUS_LENGTH_M: Final[float] = 7.0
+_ESTIMATED_BUS_WIDTH_M: Final[float] = 2.5
 _ESTIMATED_CYCLIST_LENGTH_M: Final[float] = 2.0
 _ESTIMATED_CYCLIST_WIDTH_M: Final[float] = 0.7
 _PLOT_BOUNDS_BUFFER_M: Final[float] = 30.0
@@ -39,6 +42,25 @@ _LANE_SEGMENT_COLOR: Final[str] = "#E0E0E0"
 _DEFAULT_ACTOR_COLOR: Final[str] = "#D3E8EF"
 _FOCAL_AGENT_COLOR: Final[str] = "#ECA25B"
 _AV_COLOR: Final[str] = "#007672"
+
+# ['vehicle', 'pedestrian', 'motorcyclist', 'cyclist', 'bus', 'static', 'background', 'construction', 'riderless_bicycle', 'unknown']
+
+_PRED_AGENTS_COLORS: Final[Dict] = {
+    "VEHICLE": "#0066FF", #blue
+    "MOTORCYCLIST": "#8000E6", #purple
+    "CYCLIST": "#00CC66", #green,
+    "PEDESTRIAN": "#E60000",
+    "BUS": "#CCCC00",
+    "OTHER": "#666666" #grey
+}
+_UNPRED_AGENTS_COLORS: Final[Dict] = {
+    "VEHICLE": "#D6E6FF", #blue
+    "MOTORCYCLIST": "#EAD6FF", #purple
+    "CYCLIST": "#D6FFE6", #green
+    "PEDESTRIAN": "#FFD6D6", #red
+    "BUS": "#FFF0B3", #yellow
+    "OTHER":"#E6E6E6"  #grey
+}
 _BOUNDING_BOX_ZORDER: Final[
     int
 ] = 100  # Ensure actor bounding boxes are plotted on top of all map elements
@@ -50,12 +72,30 @@ _STATIC_OBJECT_TYPES: Set[ObjectType] = {
     ObjectType.RIDERLESS_BICYCLE,
 }
 
+def _add_color_legend(ax: plt.Axes) -> None:
+    fig = ax.get_figure()
+    all_handles = [
+        mpatches.Patch(color=color, label=label.title())
+        for label, color in {**_PRED_AGENTS_COLORS, **_UNPRED_AGENTS_COLORS}.items()
+    ]
+
+    fig.legend(
+        handles=all_handles,
+        loc='lower center',
+        ncol=4,        # adjust as needed
+        frameon=False,
+        prop={"size": 16}
+    )
+    fig.subplots_adjust(bottom=0.05)  # make space for the legend
+
+
 def visualize_scenario_prediction(
     scenario: ArgoverseScenario,
     scenario_static_map: ArgoverseStaticMap,
     additional_traj: dict,
     traj_visible: dict,
     save_path: Path,
+    show_legend:bool = False
 ) -> None:
     """Build dynamic visualization for all tracks and the local map associated with an Argoverse scenario.
 
@@ -128,13 +168,13 @@ def visualize_scenario_prediction(
             color = ['dodgerblue']*rec_traj.shape[0]
         for k in range(rec_traj.shape[0]):
             if k in special_set:
+                # for i in range(rec_traj.shape[1]):
+                #     plt.plot(rec_traj[k,i,:50,0],rec_traj[k,i,:50,1],color = 'dodgerblue',linewidth = 6,alpha = 0.2, zorder = 10000)
                 for i in range(rec_traj.shape[1]):
-                    plt.plot(rec_traj[k,i,:50,0],rec_traj[k,i,:50,1],color = 'dodgerblue',linewidth = 6,alpha = 0.2, zorder = 10000)
-                for i in range(rec_traj.shape[1]):
-                    plt.plot(rec_traj[k,i,50:,0],rec_traj[k,i,50:,1],color = 'blue',linewidth = 6,alpha = 0.2, zorder = 10000)
+                    plt.plot(rec_traj[k,i,:,0],rec_traj[k,i,:,1],color = 'orange',linewidth = 6,alpha = 0.3, zorder = 10000)
             else:
                 for i in range(rec_traj.shape[1]):
-                    plt.plot(rec_traj[k,i,:,0],rec_traj[k,i,:,1],color = 'orange',linewidth = 6,alpha = 0.01, zorder = 1000)
+                    plt.plot(rec_traj[k,i,:,0],rec_traj[k,i,:,1],color = 'blue',linewidth = 6,alpha = 0.01, zorder = 1000)
                 
     if traj_visible['marg_traj']:
         marg_traj = additional_traj['marg_traj']
@@ -172,7 +212,8 @@ def visualize_scenario_prediction(
     #     plot_bounds[3] + _PLOT_BOUNDS_BUFFER_M,
     # )
     plt.gca().set_aspect("equal", adjustable="box")
-    
+    if show_legend:
+        _add_color_legend(ax)
     plt.savefig(save_path)
     plt.close()
     
@@ -349,7 +390,7 @@ def _plot_actor_tracks_prediction(
         )
 
         # Plot polyline for focal agent location history
-        track_color = _DEFAULT_ACTOR_COLOR
+        track_colors = _UNPRED_AGENTS_COLORS
         # if track.track_id == "AV":
         #     track_color = _AV_COLOR
             
@@ -357,7 +398,7 @@ def _plot_actor_tracks_prediction(
             x_min, x_max = actor_trajectory[:, 0].min(), actor_trajectory[:, 0].max()
             y_min, y_max = actor_trajectory[:, 1].min(), actor_trajectory[:, 1].max()
             track_bounds = (x_min, x_max, y_min, y_max)
-            track_color = _AV_COLOR
+            track_colors = _PRED_AGENTS_COLORS
 
         # Plot bounding boxes for all vehicles and cyclists
         if track.object_type == ObjectType.VEHICLE:
@@ -365,27 +406,66 @@ def _plot_actor_tracks_prediction(
                 ax,
                 actor_trajectory[-1],
                 actor_headings[-1],
-                track_color,
+                track_colors["VEHICLE"],
                 (_ESTIMATED_VEHICLE_LENGTH_M, _ESTIMATED_VEHICLE_WIDTH_M),
             )
         elif (
-            track.object_type == ObjectType.CYCLIST
-            or track.object_type == ObjectType.MOTORCYCLIST
+            track.object_type == ObjectType.BUS
         ):
             _plot_actor_bounding_box(
                 ax,
                 actor_trajectory[-1],
                 actor_headings[-1],
-                track_color,
+                track_colors["BUS"],
+                (_ESTIMATED_BUS_LENGTH_M, _ESTIMATED_BUS_WIDTH_M),
+            )
+        elif (
+            track.object_type == ObjectType.MOTORCYCLIST
+        ):
+            _plot_actor_bounding_box(
+                ax,
+                actor_trajectory[-1],
+                actor_headings[-1],
+                track_colors["MOTORCYCLIST"],
                 (_ESTIMATED_CYCLIST_LENGTH_M, _ESTIMATED_CYCLIST_WIDTH_M),
+            )
+        elif (
+            track.object_type == ObjectType.MOTORCYCLIST
+        ):
+            _plot_actor_bounding_box(
+                ax,
+                actor_trajectory[-1],
+                actor_headings[-1],
+                track_colors["MOTORCYCLIST"],
+                (_ESTIMATED_CYCLIST_LENGTH_M, _ESTIMATED_CYCLIST_WIDTH_M),
+            )
+        elif (
+            track.object_type == ObjectType.CYCLIST
+        ):
+            _plot_actor_bounding_box(
+                ax,
+                actor_trajectory[-1],
+                actor_headings[-1],
+                track_colors["CYCLIST"],
+                (_ESTIMATED_CYCLIST_LENGTH_M, _ESTIMATED_CYCLIST_WIDTH_M),
+            )
+        elif (
+            track.object_type == ObjectType.PEDESTRIAN
+        ):
+            plt.plot(
+                actor_trajectory[-1, 0],
+                actor_trajectory[-1, 1],
+                "o",
+                color=track_colors["PEDESTRIAN"],
+                markersize=7,
             )
         else:
             plt.plot(
                 actor_trajectory[-1, 0],
                 actor_trajectory[-1, 1],
                 "o",
-                color=track_color,
-                markersize=4,
+                color=track_colors["OTHER"],
+                markersize=7,
             )
 
     return track_bounds
