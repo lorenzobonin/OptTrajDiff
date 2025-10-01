@@ -145,6 +145,7 @@ class GuidedDiffNet(DiffNet):
         goal_point,
         num_scenes,
         num_agents_per_scene,
+        exp_id = ""
     ):
         """Handles only the plotting/visualization logic for latent_generator."""
 
@@ -208,7 +209,7 @@ class GuidedDiffNet(DiffNet):
             viz_output_dir = Path(img_folder) / sub_folder
             os.makedirs(viz_output_dir, exist_ok=True)
 
-            viz_save_path = viz_output_dir / (f'viz_{b_idx}.jpg')
+            viz_save_path = viz_output_dir / (f'viz_{b_idx}'+exp_id+'.jpg')
 
             additional_traj = {
                 'gt': gt_eval_world[start_id:end_id],
@@ -229,7 +230,7 @@ class GuidedDiffNet(DiffNet):
 
     
 
-    def latent_generator(self, latent_point, b_idx, plot=False, enable_grads=False, return_pred_only=True):
+    def latent_generator(self, latent_point, b_idx, plot=False, enable_grads=False, return_pred_only=True,exp_id = ""):
         """Runs diffusion from a latent and reconstructs trajectories."""
         if self.cond_data is None:
             raise RuntimeError("cond_data must be set before calling latent_generator().")
@@ -411,27 +412,28 @@ class GuidedDiffNet(DiffNet):
                     b_idx=b_idx, data=data, eval_mask=eval_mask,
                     traj_refine=traj_refine, rec_traj=rec_traj,
                     gt_eval=gt_eval, goal_point=goal_point,
-                    num_scenes=num_scenes, num_agents_per_scene=num_agents_per_scene,
+                    num_scenes=num_scenes, num_agents_per_scene=num_agents_per_scene, exp_id = exp_id
                 )
 
             return rec_traj_world.squeeze(1)   # [N_eval, 60, 2]
 
         else:
-        # ---------- NEW: return full + components ----------
+            # ---------- NEW: return full + components (scene-consistent) ----------
             N_total = data['agent']['category'].size(0)
             T = self.num_future_steps
 
-            # Predicted local trajectories for eval agents
-            pred_eval_local = rec_traj.squeeze(1)          # [N_eval, 60, 2]
-            mask_eval = reg_mask[eval_mask].unsqueeze(-1)  # [N_eval, 60, 1]
-            gt_eval_local = gt[eval_mask][..., :2]         # [N_eval, 60, 2]
+            # Predicted local trajectories for all eval agents (global order)
+            pred_eval_local_all = rec_traj.squeeze(1)        # [N_eval_all, 60, 2]
+            mask_eval_all = reg_mask[eval_mask].unsqueeze(-1)  # [N_eval_all, 60, 1]
+            gt_eval_local_all = gt[eval_mask][..., :2]       # [N_eval_all, 60, 2]
 
             # Start with GT for all agents
-            full_local = gt[:, :T, :2].clone()             # [N_total, 60, 2]
+            full_local = gt[:, :T, :2].clone()               # [N_total, 60, 2]
 
-            # Replace eval agents with fused pred+gt (only for display/logging!)
-            fused_eval_local = pred_eval_local * mask_eval.float() + gt_eval_local * (1.0 - mask_eval.float())
-            full_local[eval_mask] = fused_eval_local
+            # Fused eval (for display/logging only)
+            fused_eval_local_all = pred_eval_local_all * mask_eval_all.float() \
+                                   + gt_eval_local_all * (1.0 - mask_eval_all.float())
+            full_local[eval_mask] = fused_eval_local_all
 
             # Rotate ALL agents into world coords
             origin_all = data['agent']['position'][:, self.num_historical_steps - 1, :2]   # [N_total, 2]
@@ -446,5 +448,29 @@ class GuidedDiffNet(DiffNet):
             full_world = torch.einsum('ntc,ncd->ntd', full_local, rot_all) \
                         + origin_all[:, :2].unsqueeze(1)   # [N_total, 60, 2]
 
-            # Return both fused (for eval) and raw pred (for gradient)
-            return full_world, pred_eval_local, mask_eval
+            # --------- SCENE-CONSISTENT INDICES/MASKS ----------
+            batch_ids = data['agent']['batch']  # [N_total]
+            # scene_mask is True for agents belonging to this b_idx.
+            if (batch_ids == b_idx).any():
+                scene_mask = (batch_ids == b_idx)
+            else:
+                # If cond_data is single-scene, b_idx likely doesn't exist here; take all agents.
+                scene_mask = torch.ones_like(batch_ids, dtype=torch.bool)
+
+            # Global eval indices (positions in [0..N_total-1])
+            eval_idx_all = torch.nonzero(eval_mask, as_tuple=False).squeeze(-1)  # [N_eval_all]
+
+            # Among those eval agents, pick only those belonging to this scene
+            # This yields positions inside the eval list
+            scene_positions_in_eval = torch.nonzero(scene_mask[eval_mask],
+                                                    as_tuple=False).squeeze(-1)  # [N_eval_scene]
+
+            # Row indices into full_world for the scene’s eval agents
+            eval_idx_scene = eval_idx_all[scene_positions_in_eval]               # [N_eval_scene]
+
+            # Slice predicted things to scene only
+            pred_eval_local_scene = pred_eval_local_all[scene_positions_in_eval]  # [N_eval_scene, 60, 2]
+            mask_eval_scene = mask_eval_all[scene_positions_in_eval]              # [N_eval_scene, 60, 1]
+
+            # Return full world + scene-consistent pieces
+            return full_world, pred_eval_local_scene, mask_eval_scene, eval_idx_scene
