@@ -219,14 +219,14 @@ class GuidedDiffNet(DiffNet):
             }
 
             traj_visible = {
-                'gt': True,
+                'gt': False,
                 'gt_goal': False,
                 'goal_point': False,
                 'marg_traj': False,
                 'rec_traj': True,
             }
 
-            visualize_scenario_prediction(scenario, static_map, additional_traj, traj_visible, viz_save_path)
+            visualize_scenario_prediction(scenario, static_map, additional_traj, traj_visible, viz_save_path, show_legend = True)
 
     
 
@@ -366,6 +366,7 @@ class GuidedDiffNet(DiffNet):
         reverse_steps = None
         device = traj_refine.device
 
+
         pred_modes = self.joint_diffusion.from_latent(
             latent_point.to(device), data=data, scene_enc=scene_enc,
             mean=mean, std=std, mm=marginal_mode,
@@ -375,6 +376,7 @@ class GuidedDiffNet(DiffNet):
             eval_mask=eval_mask,
             enable_grads=enable_grads
         )
+
 
         if self.cond_norm:
             pred_modes = self.unnormalize(pred_modes, marg_mean, marg_std)
