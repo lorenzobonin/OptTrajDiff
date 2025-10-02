@@ -32,49 +32,40 @@ def reshape_trajectories(pred: torch.Tensor, node_types: torch.Tensor) -> torch.
     return trajectory
 
 
-def reshape_trajectories_clip(pred: torch.Tensor, 
-                         node_types: torch.Tensor, 
-                         vel_clip: float = 50.0) -> torch.Tensor:
+def impute_positions_closest(pred: torch.Tensor) -> torch.Tensor:
     """
-    pred: [N,T,2] positions (x,y)
-    node_types: [N] agent types (ints/floats)
-    vel_clip: maximum allowed velocity magnitude (m/s).
-              Any |v| above this is clipped to vel_clip.
-
-    Returns:
-        trajectory: [1,N,6,T] with features [x, y, vx, vy, |v|, type]
+    pred: [N,T,2] with (0,0) for invalid agents
+    Returns: imputed [N,T,2] where invalids are filled with nearest valid (forward+backward).
     """
     device, dtype = pred.device, pred.dtype
-    N, T, _ = pred.shape
+    N, T, D = pred.shape
+    assert D == 2, "Expected positions with 2D coordinates"
 
-    # Add signal dimension -> [1,N,2,T]
-    positions = pred.unsqueeze(0).permute(0, 1, 3, 2)  # [1,N,2,T]
+    invalid = (pred.abs().sum(-1) == 0)  # [N,T] boolean
+    imputed = pred.clone()
 
-    # Velocities [1,N,2,T] (finite difference)
-    velocities = positions[:, :, :, 1:] - positions[:, :, :, :-1]
-    # Pad last timestep with repeat of previous velocity
-    velocities = torch.cat([velocities, velocities[:, :, :, -1:]], dim=-1)
+    # --- Forward fill ---
+    last_valid = pred[:,0:1,:]  # [N,1,2]
+    for t in range(1,T):
+        last_valid = torch.where(invalid[:,t:t+1].unsqueeze(-1), last_valid, pred[:,t:t+1,:])
+        imputed[:,t:t+1,:] = torch.where(invalid[:,t:t+1].unsqueeze(-1), last_valid, pred[:,t:t+1,:])
 
-    # Compute speed [1,N,1,T]
-    abs_vel = velocities.norm(dim=2, keepdim=True)
+    # --- Backward fill ---
+    first_valid = pred[:,-1:,:]  # start from end
+    for t in range(T-2,-1,-1):
+        first_valid = torch.where(invalid[:,t:t+1].unsqueeze(-1), first_valid, pred[:,t:t+1,:])
+        imputed[:,t:t+1,:] = torch.where(invalid[:,t:t+1].unsqueeze(-1), first_valid, imputed[:,t:t+1,:])
 
-    # ---- Clip outlier velocities ----
-    # Scale down vectors that exceed clip
-    mask = abs_vel > vel_clip
-    if mask.any():
-        scale = vel_clip / (abs_vel[mask] + 1e-6)
-        # Broadcast scaling factor back to velocities
-        velocities[mask.expand_as(velocities)] *= scale.repeat_interleave(2)
-        # Recompute clipped |v|
-        abs_vel = velocities.norm(dim=2, keepdim=True)
+    return imputed
 
-    # Node types [1,N,1,T]
-    nt = node_types.to(device=device, dtype=dtype).view(1, N, 1, 1).expand(1, N, 1, T)
+def clean_near_zero(t: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
+    """
+    Replace very small values (|x| < eps) with 0, preserving gradient flow.
+    """
+    return torch.where(t.abs() < eps, torch.zeros_like(t), t)
 
-    # Concatenate along feature axis -> [1,N,6,T]
-    trajectory = torch.cat([positions, velocities, abs_vel, nt], dim=2)
 
-    return trajectory
+
 
 
 

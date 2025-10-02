@@ -174,18 +174,22 @@ if __name__ == '__main__':
     x_T = torch.randn([num_agents, 1, num_dim])
     
     full_world, pred_eval_local, mask_eval, eval_mask = model.latent_generator(x_T, i, plot=False, enable_grads=True, return_pred_only=False)
-    N, T, _ = full_world.shape
+    N, T, _ = pred_eval_local.shape
 
     # Node categories (adapt if you have heterogeneous agents)
-    node_types = torch.ones(N, device = full_world.device)
-    
-    full_reshaped = su.reshape_trajectories(full_world, node_types)
+    node_types = torch.ones(N, device = pred_eval_local.device)
+    full_wolrd = su.clean_near_zero(pred_eval_local, eps=1e-4)
+    imputed_full = su.impute_positions_closest(full_wolrd)
+    full_reshaped = su.reshape_trajectories(imputed_full, node_types)
+    dirty_reshaped = su.reshape_trajectories(pred_eval_local, node_types)
 
     su.summarize_reshaped(full_reshaped)
+    su.summarize_reshaped(dirty_reshaped)
     print("mask eval size is ", mask_eval.size())
     print("eval mask size is ", eval_mask.size())
     print("pred eval local size is ", pred_eval_local.size())
-    print()
+    print("full world", full_world[0])
+    print("imputed full", imputed_full[0])
     #print("traj requires grad:", full_world.requires_grad)
     #print("traj grad_fn:", full_world.grad_fn)
     print('only pred size is ', model.latent_generator(x_T, i, plot=False, enable_grads=True, return_pred_only=True).size())
