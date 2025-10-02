@@ -11,92 +11,14 @@ import os
 import torch
 import matplotlib.pyplot as plt
 
-import strel_utils as su
-
-import copy
-
-
-
-
-
-
-
-
-def softmax_max(x, dim, temp=10.0):
-    # higher temp → closer to hard max
-    weights = torch.softmax(x * temp, dim=dim)
-    return (x * weights).sum(dim=dim)
-
-
-def plot_trajectories(trajectories, filename="trajectories.png"):
-    """
-    trajectories: tensor [num_agents, samples, timesteps, 2]
-    """
-    if isinstance(trajectories, torch.Tensor):
-        trajectories = trajectories.cpu().numpy()
-    
-    num_agents, num_samples, _, _ = trajectories.shape
-    
-    plt.figure(figsize=(6, 6))
-    
-    for agent in range(num_agents):
-        for sample in range(num_samples):
-            traj = trajectories[agent, sample]  # shape [timesteps, 2]
-            x, y = traj[:, 0], traj[:, 1]
-            plt.plot(x, y, linewidth=1, alpha=0.7)
-    
-    plt.xlabel("X")
-    plt.ylabel("Y")
-    plt.title("2D Trajectories")
-    plt.axis("equal")
-    plt.grid(True)
-    
-    plt.savefig(filename, dpi=300, bbox_inches="tight")
-    plt.close()
-
-class GenFromLatent(pl.LightningModule):
-    def __init__(self, model, scen_id):
-        super().__init__()
-        self.model = model
-        self.scen_id = scen_id
-
-        #insert STREL here if needed
-
-    
-
-    def forward(self, x_T):
-        # Ask for fused world + differentiable pieces
-        out = self.model.latent_generator(
-            x_T,
-            self.scen_id,
-            plot=False,
-            enable_grads=True,
-            return_pred_only=False
-        )
-
-    
-        full_world, pred_eval_local, mask_eval, eval_mask = out
-
-        #full_world = out
-        
-        # Robustness over the whole fused world trajectory
-        #robustness = su.toy_safety_function(full_world, min_dist=2.0)
-        #robustness = su.evaluate_reach_property(full_world, left_label=1, right_label=1, threshold_1=3.0, threshold_2=3.0)
-        #robustness = su.evaluate_reach_property_mask(full_world, mask_eval, eval_mask, left_label=1, right_label=1, threshold_1=3.0, threshold_2=3.0)
-        robustness = su.evaluate_eg_reach_mask(full_world, mask_eval, eval_mask, left_label=[1], right_label=[1], threshold_1=4.0, threshold_2=2.0, d_max=50)
-        return robustness
-
-
-
-        #return self.model.latent_generator(x_T, self.scen_id, plot=False, enable_grads=True, return_pred_only=False)
 
 if __name__ == '__main__':
-    pl.seed_everything(20 , workers=True)
+    pl.seed_everything(2025, workers=True)
 
     parser = ArgumentParser()
     parser.add_argument('--root', type=str, required=True)
     parser.add_argument('--batch_size', type=int, default=4)
-    parser.add_argument('--num_workers', type=int, default=4) 
+    parser.add_argument('--num_workers', type=int, default=1) 
     parser.add_argument('--pin_memory', type=bool, default=True)
     parser.add_argument('--persistent_workers', type=bool, default=True)
     parser.add_argument('--accelerator', type=str, default='auto')
@@ -149,79 +71,88 @@ if __name__ == '__main__':
         'argoverse_v2': ArgoverseV2Dataset,
     }[model.dataset](root=args.root, split=split,
                      transform=TargetBuilder(model.num_historical_steps, model.num_future_steps))
+
+    top_num_agents_scenarios = [(28, 18070), (25, 7520), (24, 11135), (23, 4611), (22, 23297), (20, 6323), (20, 7129), (19, 1359), (19, 6569), (19, 6937)]
+    top_diversity_scenarios = [(10, 8709), (10, 9817), (9, 4433), (9, 7391), (9, 7928), (9, 9290), (9, 9738), (9, 10302), (9, 10863), (9, 12518)]
+
+    for num_agents, idx in top_num_agents_scenarios:
+        
+        first_graph = test_dataset[idx]
+        first_graph = Batch.from_data_list([first_graph])
+
+        model.cond_data = first_graph
+        num_dim = 10
+        x_T = torch.randn([num_agents, 1, num_dim])
+        pred = model.latent_generator(x_T, idx, plot=True)
+
+    # for _, idx in top_diversity_scenarios:
+        
+    #     first_graph = test_dataset[idx]
+
+    #     # print(first_graph)
+    #     # Turn it back into a HeteroDataBatch object (the only one working)
+    #     first_graph = Batch.from_data_list([first_graph])
+
+    #     model.cond_data = first_graph
+
+    #     # Getting an input with the right dimensionality
+    #     #num_agents = 5 # Number of predictable trajectories in the batch
+    #     num_dim = 10 # Latent dim
+    #     x_T = torch.randn([5, 1, num_dim])
+    #     pred = model.latent_generator(x_T, idx, plot=True)
+
+
+        # print(pred) # [num_agents x samples x timesteps x output_dim (2D position)]
+        # print(pred) # [num_agents x samples x timesteps x output_dim (2D position)]
+
     
-    dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
-                            pin_memory=args.pin_memory, persistent_workers=args.persistent_workers)
+    # dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
+    #                         pin_memory=args.pin_memory, persistent_workers=args.persistent_workers)
 
-    iterator = iter(dataloader)
-    data_batch = next(iterator)
+    # # iterator = iter(dataloader)
+    # # data_batch = next(iterator)
 
-    i = 5 # select scenario in the batch
-    
-    first_graph = data_batch.to_data_list()[i]
+    # top_k = 10
+    # top_agents = []      # [(num_agents, idx)]
+    # top_diverse = []     # [(num_diverse_agents, idx)]
 
-    # Turn it back into a HeteroDataBatch object (the only one working)
-    first_graph = Batch.from_data_list([first_graph])
 
-    model.cond_data = first_graph
+    # print(f"DS size: {len(test_dataset)}")
+    # for idx, data_batch in enumerate(dataloader):
+    #     if idx%1000 == 0: 
+    #         print(idx)
+    #     # i = 5 # select scenario in the batch
 
-    
-    
+    #     first_graph = data_batch.to_data_list()[0]
 
-    # Getting an input with the right dimensionality
-    num_agents = 5 # Number of predictable trajectories in the batch
-    num_dim = 10 # Latent dim
-    x_T = torch.randn([num_agents, 1, num_dim])
-    
-    full_world, pred_eval_local, mask_eval, eval_mask = model.latent_generator(x_T, i, plot=False, enable_grads=True, return_pred_only=False)
-    N, T, _ = full_world.shape
+    #     # Turn it back into a HeteroDataBatch object (the only one working)
+    #     first_graph = Batch.from_data_list([first_graph])
 
-    # Node categories (adapt if you have heterogeneous agents)
-    node_types = torch.ones(N, device = full_world.device)
-    
-    full_reshaped = su.reshape_trajectories(full_world, node_types)
+    #     # print(first_graph)
 
-    su.summarize_reshaped(full_reshaped)
-    print("mask eval size is ", mask_eval.size())
-    print("eval mask size is ", eval_mask.size())
-    print("pred eval local size is ", pred_eval_local.size())
-    print()
-    #print("traj requires grad:", full_world.requires_grad)
-    #print("traj grad_fn:", full_world.grad_fn)
-    print('only pred size is ', model.latent_generator(x_T, i, plot=False, enable_grads=True, return_pred_only=True).size())
-    print('full pred size is ', full_world.size())
-    print('full traj size is', model.cond_data['agent']['predict_mask'].size())
-    
-    
-    gen_model = GenFromLatent(model, i)
-    gen_model.eval()
-    #pred = model.latent_generator(x_T, i, plot=True)
-    z_param = torch.nn.Parameter(x_T.clone())
-    robust = gen_model(z_param)
-    print("robust.requires_grad:", robust.requires_grad)  # should be True
+    #     model.cond_data = first_graph
 
-    g = torch.autograd.grad(robust, z_param, retain_graph=True, allow_unused=True)[0]
-    print("‖grad‖:", 0.0 if g is None else g.detach().abs().max().item())
+    #     # Getting an input with the right dimensionality
+    #     #num_agents = 5 # Number of predictable trajectories in the batch
+    #     num_dim = 10 # Latent dim
+    #     x_T = torch.randn([5, 1, num_dim])
+    #     num_agents = model.latent_generator(x_T, idx, plot=False)
 
-    z_opt = su.grad_ascent_opt(qmodel = gen_model, z0 = x_T, lr=0.005, tol=1e-12)
+    #     diverse_agents = first_graph['agent'].type.unique().numel()
 
-    print("Initial latent point:", x_T)
-    print("Optimal latent point:", z_opt)
-    
-    print("Initial robustness:", robust.item())
-    robust_opt = gen_model(z_opt)
-    print("Optimal robustness:", robust_opt.item())
-    
+    #     # Track top 10 by predicted agents
+    #     top_agents.append((num_agents, idx))
+    #     top_agents = sorted(top_agents, key=lambda x: x[0], reverse=True)[:top_k]
+
+    #     # Track top 10 by diversity
+    #     top_diverse.append((diverse_agents, idx))
+    #     top_diverse = sorted(top_diverse, key=lambda x: x[0], reverse=True)[:top_k]
+
+
+    #     # print(pred) # [num_agents x samples x timesteps x output_dim (2D position)]
+
+    # print(top_agents)
+    # print(top_diverse)
             
-    r2_init, r2_opt, dlogp = su.latent_loglik_diff(z_param, z_opt)
-    print("Initial vs optimal loglik diff:", r2_init, r2_opt, dlogp)
-
-    #model.latent_generator(x_T, i, plot=True, enable_grads=False, return_pred_only=False)
-
-    
-    model.latent_generator(x_T, i, plot=True, enable_grads=False, return_pred_only=True, exp_id= "_init")
-
-    model.latent_generator(z_opt, i, plot=True, enable_grads=False, return_pred_only=True, exp_id= "_opt")
             
-    #print(model.cond_data['agent']['predict_mask'].sum()) # should be equal to num_agents
-    #print(model.cond_data['agent']['valid_mask'].sum())
+        
