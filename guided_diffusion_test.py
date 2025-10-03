@@ -75,6 +75,8 @@ if __name__ == '__main__':
     top_num_agents_scenarios = [(28, 18070), (25, 7520), (24, 11135), (23, 4611), (22, 23297), (20, 6323), (20, 7129), (19, 1359), (19, 6569), (19, 6937)]
     top_diversity_scenarios = [(10, 8709), (10, 9817), (9, 4433), (9, 7391), (9, 7928), (9, 9290), (9, 9738), (9, 10302), (9, 10863), (9, 12518)]
 
+    num_samples = 20
+
     for num_agents, idx in top_num_agents_scenarios:
         
         first_graph = test_dataset[idx]
@@ -82,7 +84,7 @@ if __name__ == '__main__':
 
         model.cond_data = first_graph
         num_dim = 10
-        x_T = torch.randn([num_agents, 1, num_dim])
+        x_T = torch.randn([num_agents, num_samples, num_dim])
         pred = model.latent_generator(x_T, idx, plot=True)
 
     # for _, idx in top_diversity_scenarios:

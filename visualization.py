@@ -149,9 +149,9 @@ def visualize_scenario_prediction(
         gt_no_pred_world = additional_traj['gt_no_pred']
         for k in range(gt_no_pred_world.shape[0]):
             if k in special_set_no_pred:
-                plt.plot(gt_no_pred_world[k,:,0],gt_no_pred_world[k,:,1],color = 'b',linewidth = 2,zorder = 1000)
+                plt.plot(gt_no_pred_world[k,:,0],gt_no_pred_world[k,:,1],color = 'b',linewidth = 5, alpha = 0.3, zorder = 1000)
             else:
-                plt.plot(gt_no_pred_world[k,:,0],gt_no_pred_world[k,:,1],color = 'b',linewidth = 2,zorder = 1000)
+                plt.plot(gt_no_pred_world[k,:,0],gt_no_pred_world[k,:,1],color = 'b',linewidth = 5, alpha = 0.3, zorder = 1000)
 
     if traj_visible['gt_goal']:
         for k in range(gt_eval_world.shape[0]):

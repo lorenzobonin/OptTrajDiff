@@ -19,11 +19,6 @@ from pathlib import Path
 from av2.datasets.motion_forecasting.data_schema import TrackCategory
 
 
-
-
-
-
-
 # Necessary since some predicted trajectories end up with unrealistic values
 
 def smooth_stop_poly(
@@ -144,6 +139,7 @@ class GuidedJointDiffusion(JointDiffusion):
 
     def from_latent(self,
                x_T,
+               num_samples: int,
                data: HeteroData,
                scene_enc: Mapping[str, torch.Tensor],
                mean=None,
@@ -161,7 +157,6 @@ class GuidedJointDiffusion(JointDiffusion):
         if reverse_steps is None:
             reverse_steps = self.var_sched.num_steps
 
-        num_samples = 1
         device = mean.device
         num_agents = mean.size(0)
 
@@ -272,9 +267,6 @@ class GuidedDiffNet(DiffNet):
             return torch.tensor(encoded, dtype=torch.long, device=device if device else "cpu")
 
         return types
-
-
-
 
 
     def plot_predictions(
@@ -422,10 +414,6 @@ class GuidedDiffNet(DiffNet):
         gt = torch.cat([data['agent']['target'][..., :self.output_dim],
                         data['agent']['target'][..., -1:]], dim=-1)              # [N_total, 60, K]
 
-        # for best mode selection etc. (unchanged)
-        l2_norm = (torch.norm(traj_refine[..., :self.output_dim] -
-                            gt[..., :self.output_dim].unsqueeze(1), p=2, dim=-1) * reg_mask.unsqueeze(1)).sum(dim=-1)
-
         if self.s_mean is None:
             s_mean = np.load(self.path_pca_s_mean)
             self.s_mean = torch.tensor(s_mean).to(gt.device)
@@ -480,18 +468,6 @@ class GuidedDiffNet(DiffNet):
         target_mode = torch.matmul(flat_gt - self.s_mean, self.VT_k)
         target_mode = self.normalize(target_mode, self.latent_mean, self.latent_std)
 
-        # choose best mode (unchanged)
-        fde_marginal_gt = torch.norm(traj_refine[:, :, -1, :2] - gt[:, -1, :2].unsqueeze(1), dim=-1)
-        if self.choose_best_mode == 'FDE':
-            best_fde_mode = fde_marginal_gt.argmin(dim=-1)
-            best_l2_mode = l2_norm.argmin(dim=-1)
-            best_mode = best_l2_mode
-            fde_valid = reg_mask[:, -1] == True
-            best_mode[fde_valid] = best_fde_mode[fde_valid]
-        elif self.choose_best_mode == 'ADE':
-            best_l2_mode = l2_norm.argmin(dim=-1)
-            best_mode = best_l2_mode
-
         if self.dataset == 'argoverse_v2':
             eval_mask = data['agent']['category'] >= 2
         else:
@@ -520,17 +496,17 @@ class GuidedDiffNet(DiffNet):
             std = torch.ones_like(marg_std)
         else:
             mean = marg_mean
-            std = marg_std
+            std = marg_std      
 
         # Diffusion from latent (eval agents only)
         self.joint_diffusion.eval()
-        num_samples = 1
+        num_samples = latent_point.shape[1]
         reverse_steps = None
         device = traj_refine.device
 
 
         pred_modes = self.joint_diffusion.from_latent(
-            latent_point.to(device), data=data, scene_enc=scene_enc,
+            latent_point.to(device), num_samples=num_samples, data=data, scene_enc=scene_enc,
             mean=mean, std=std, mm=marginal_mode,
             mmscore=pi.exp()[eval_mask],
             stride=self.sampling_stride,
@@ -547,7 +523,7 @@ class GuidedDiffNet(DiffNet):
         unnorm_pred_modes = self.unnormalize(pred_modes, self.latent_mean, self.latent_std)
         rec_traj = torch.matmul(
             unnorm_pred_modes.permute(1, 0, 2),
-            (self.V_k).unsqueeze(0).repeat(1, num_samples, 1)
+            (self.V_k).unsqueeze(0).repeat(num_samples, 1, 1)
         ) + self.s_mean.unsqueeze(0)
         rec_traj = rec_traj.permute(1, 0, 2)                         # [N_eval, 1, 60, 2]
         rec_traj = rec_traj.view(rec_traj.size(0), rec_traj.size(1), self.num_future_steps, 2)
@@ -582,9 +558,9 @@ class GuidedDiffNet(DiffNet):
             
             if return_types:
                 types = self.decode_types_from_scenario(data, b_idx, return_pred=True)
-                return rec_traj_world.squeeze(1), types   # [N_eval, 60, 2], list[str]
+                return (rec_traj_world.squeeze(1) if num_samples==1 else rec_traj_world), types   # [N_eval, 60, 2], list[str]
             else:
-                return rec_traj_world.squeeze(1)   # [N_eval, 60, 2]
+                return (rec_traj_world.squeeze(1) if num_samples==1 else rec_traj_world)   # [N_eval, 60, 2]
 
         else:
             # ---------- NEW: return full + components (scene-consistent) ----------
