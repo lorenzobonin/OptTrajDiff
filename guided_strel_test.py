@@ -55,10 +55,11 @@ def plot_trajectories(trajectories, filename="trajectories.png"):
     plt.close()
 
 class GenFromLatent(pl.LightningModule):
-    def __init__(self, model, scen_id):
+    def __init__(self, model, scen_id, node_types):
         super().__init__()
         self.model = model
         self.scen_id = scen_id
+        self.node_types = node_types
 
         #insert STREL here if needed
 
@@ -83,9 +84,8 @@ class GenFromLatent(pl.LightningModule):
         #robustness = su.toy_safety_function(full_world, min_dist=2.0)
         #robustness = su.evaluate_reach_property(full_world, left_label=1, right_label=1, threshold_1=3.0, threshold_2=3.0)
         #robustness = su.evaluate_reach_property_mask(full_world, mask_eval, eval_mask, left_label=1, right_label=1, threshold_1=3.0, threshold_2=3.0)
-        robustness = su.evaluate_eg_reach_mask(full_world, mask_eval, eval_mask, left_label=[1], right_label=[1], threshold_1=4.0, threshold_2=2.0, d_max=50)
+        robustness = su.evaluate_eg_reach_mask(full_world, mask_eval, eval_mask, self.node_types, left_label=[0], right_label=[0], threshold_1=4.0, threshold_2=2.0, d_max=50)
         return robustness
-
 
 
         #return self.model.latent_generator(x_T, self.scen_id, plot=False, enable_grads=True, return_pred_only=False)
@@ -173,31 +173,31 @@ if __name__ == '__main__':
     num_dim = 10 # Latent dim
     x_T = torch.randn([num_agents, 1, num_dim])
     
-    full_world, pred_eval_local, mask_eval, eval_mask = model.latent_generator(x_T, i, plot=False, enable_grads=True, return_pred_only=False)
-    N, T, _ = pred_eval_local.shape
+    full_world, pred_eval_local, mask_eval, eval_mask, full_types = model.latent_generator(x_T, i, plot=False, enable_grads=True, return_pred_only=False, return_types=True)
+    pred_local, pred_types = model.latent_generator(x_T, i, plot=False, enable_grads=True, return_pred_only=True, return_types=True)
+    
+    N, T, _ = full_world.shape
+    print("Full types:", full_types)
+    print("Pred types:", pred_types)
+    print("full type shape:", full_types.size())
+    print("pred type shape:", pred_types.size())
 
     # Node categories (adapt if you have heterogeneous agents)
-    node_types = torch.ones(N, device = pred_eval_local.device)
-    full_wolrd = su.clean_near_zero(pred_eval_local, eps=1e-4)
-    imputed_full = su.impute_positions_closest(full_wolrd)
-    full_reshaped = su.reshape_trajectories(imputed_full, node_types)
-    dirty_reshaped = su.reshape_trajectories(pred_eval_local, node_types)
+    node_types = full_types
+
+    #node_types = torch.zeros(N, dtype=torch.long)
+    full_reshaped = su.reshape_trajectories(full_world, node_types)
 
     su.summarize_reshaped(full_reshaped)
-    su.summarize_reshaped(dirty_reshaped)
-    print("mask eval size is ", mask_eval.size())
-    print("eval mask size is ", eval_mask.size())
-    print("pred eval local size is ", pred_eval_local.size())
-    print("full world", full_world[0])
-    print("imputed full", imputed_full[0])
+    #print("full world", full_world[0])
+    #print("imputed full", imputed_full[0])
     #print("traj requires grad:", full_world.requires_grad)
     #print("traj grad_fn:", full_world.grad_fn)
     print('only pred size is ', model.latent_generator(x_T, i, plot=False, enable_grads=True, return_pred_only=True).size())
     print('full pred size is ', full_world.size())
-    print('full traj size is', model.cond_data['agent']['predict_mask'].size())
     
     
-    gen_model = GenFromLatent(model, i)
+    gen_model = GenFromLatent(model, i, node_types)
     gen_model.eval()
     #pred = model.latent_generator(x_T, i, plot=True)
     z_param = torch.nn.Parameter(x_T.clone())

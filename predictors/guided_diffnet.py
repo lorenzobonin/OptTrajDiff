@@ -15,6 +15,15 @@ from av2.map.map_api import ArgoverseStaticMap
 import os
 from pathlib import Path
 
+
+from av2.datasets.motion_forecasting.data_schema import TrackCategory
+
+
+
+
+
+
+
 # --- safe deepcopy for tensors ---
 def deepcopy_preserve_tensors(obj):
     """Deepcopy that replaces Tensors with .clone(), preserving autograd."""
@@ -134,6 +143,39 @@ class GuidedDiffNet(DiffNet):
     def cond_data(self, value):
         self._cond_data = value
 
+    def decode_types_from_scenario(self, data, b_idx=0, return_pred=False, as_tensor=True, device=None):
+        # Mapping from Argoverse numeric types to names
+        ID_TO_TYPE = {
+            0: "VEHICLE",
+            1: "PEDESTRIAN",
+            2: "CYCLIST",
+            3: "MOTORCYCLIST",
+            4: "BUS",
+            5: "STATIC",
+            6: "BACKGROUND",
+            7: "CONSTRUCTION",
+            8: "RIDERLESS_BICYCLE",
+            9: "UNKNOWN",
+        }
+
+        type_ids = data['agent']['type'].cpu().numpy()
+        types = [ID_TO_TYPE.get(int(t), "UNKNOWN") for t in type_ids]
+
+        if return_pred:
+            eval_mask = data['agent']['category'] >= 2
+            types = [t for i, t in enumerate(types) if eval_mask[i]]
+
+        if as_tensor:
+            TYPE_TO_INT = {v: k for k, v in ID_TO_TYPE.items()}
+            encoded = [TYPE_TO_INT.get(t, 9) for t in types]
+            return torch.tensor(encoded, dtype=torch.long, device=device if device else "cpu")
+
+        return types
+
+
+
+
+
     def plot_predictions(
         self,
         b_idx,
@@ -142,12 +184,15 @@ class GuidedDiffNet(DiffNet):
         traj_refine,
         rec_traj,
         gt_eval,
+        gt_no_pred,
         goal_point,
         num_scenes,
         num_agents_per_scene,
         exp_id = ""
     ):
         """Handles only the plotting/visualization logic for latent_generator."""
+
+        non_eval_mask = ~eval_mask
 
         origin_eval = data['agent']['position'][eval_mask, self.num_historical_steps - 1]
         theta_eval = data['agent']['heading'][eval_mask, self.num_historical_steps - 1]
@@ -157,6 +202,16 @@ class GuidedDiffNet(DiffNet):
         rot_mat[:, 0, 1] = sin
         rot_mat[:, 1, 0] = -sin
         rot_mat[:, 1, 1] = cos
+
+        # Origins and rotations for non-eval
+        origin_non_eval = data['agent']['position'][non_eval_mask, self.num_historical_steps - 1]
+        theta_non_eval = data['agent']['heading'][non_eval_mask, self.num_historical_steps - 1]
+        cos_ne, sin_ne = theta_non_eval.cos(), theta_non_eval.sin()
+        rot_mat_ne = torch.zeros(non_eval_mask.sum(), 2, 2, device=self.device)
+        rot_mat_ne[:, 0, 0] = cos_ne
+        rot_mat_ne[:, 0, 1] = sin_ne
+        rot_mat_ne[:, 1, 0] = -sin_ne
+        rot_mat_ne[:, 1, 1] = cos_ne
 
         rec_traj_world = torch.matmul(rec_traj[:, :, :, :2],
                                     rot_mat.unsqueeze(1)) + origin_eval[:, :2].reshape(-1, 1, 1, 2)
@@ -168,6 +223,10 @@ class GuidedDiffNet(DiffNet):
 
         gt_eval_world = torch.matmul(gt_eval[:, :, :2], rot_mat) + origin_eval[:, :2].reshape(-1, 1, 2)
         gt_eval_world = gt_eval_world.detach().cpu().numpy()
+
+        gt_no_pred_world = torch.matmul(gt_no_pred[:, :, :2], rot_mat_ne) + origin_non_eval[:, :2].reshape(-1, 1, 2)
+        gt_no_pred_world = smooth_stop_poly(gt_no_pred_world, max_step=10.0)
+        gt_no_pred_world = gt_no_pred_world.detach().cpu().numpy()
 
         goal_point_world = torch.matmul(goal_point[:, None, None, :],
                                         rot_mat.unsqueeze(1)) + origin_eval[:, :2].reshape(-1, 1, 1, 2)
@@ -213,6 +272,7 @@ class GuidedDiffNet(DiffNet):
 
             additional_traj = {
                 'gt': gt_eval_world[start_id:end_id],
+                'gt_no_pred': gt_no_pred_world, #bugged for more scenarios
                 'goal_point': goal_point_world,
                 'marg_traj': marg_traj_world[start_id:end_id],
                 'rec_traj': rec_traj_world_np[start_id:end_id],
@@ -220,6 +280,7 @@ class GuidedDiffNet(DiffNet):
 
             traj_visible = {
                 'gt': False,
+                'gt_no_pred': True,
                 'gt_goal': False,
                 'goal_point': False,
                 'marg_traj': False,
@@ -228,9 +289,8 @@ class GuidedDiffNet(DiffNet):
 
             visualize_scenario_prediction(scenario, static_map, additional_traj, traj_visible, viz_save_path, show_legend = True)
 
-    
 
-    def latent_generator(self, latent_point, b_idx, plot=False, enable_grads=False, return_pred_only=True,exp_id = ""):
+    def latent_generator(self, latent_point, b_idx, plot=False, enable_grads=False, return_pred_only=True,exp_id = "", return_types=False):
         """Runs diffusion from a latent and reconstructs trajectories."""
         if self.cond_data is None:
             raise RuntimeError("cond_data must be set before calling latent_generator().")
@@ -338,6 +398,7 @@ class GuidedDiffNet(DiffNet):
 
         valid_mask_eval = reg_mask[eval_mask]
         gt_eval = gt[eval_mask]
+        gt_no_pred = gt[~eval_mask]
 
         # Build marginal modes (unchanged)
         marginal_trajs = traj_refine[eval_mask, :, :, :2]
@@ -413,11 +474,16 @@ class GuidedDiffNet(DiffNet):
                 self.plot_predictions(
                     b_idx=b_idx, data=data, eval_mask=eval_mask,
                     traj_refine=traj_refine, rec_traj=rec_traj,
-                    gt_eval=gt_eval, goal_point=goal_point,
+                    gt_eval=gt_eval, gt_no_pred=gt_no_pred, goal_point=goal_point,
                     num_scenes=num_scenes, num_agents_per_scene=num_agents_per_scene, exp_id = exp_id
                 )
 
-            return rec_traj_world.squeeze(1)   # [N_eval, 60, 2]
+            
+            if return_types:
+                types = self.decode_types_from_scenario(data, b_idx, return_pred=True)
+                return rec_traj_world.squeeze(1), types   # [N_eval, 60, 2], list[str]
+            else:
+                return rec_traj_world.squeeze(1)   # [N_eval, 60, 2]
 
         else:
             # ---------- NEW: return full + components (scene-consistent) ----------
@@ -475,4 +541,8 @@ class GuidedDiffNet(DiffNet):
             mask_eval_scene = mask_eval_all[scene_positions_in_eval]              # [N_eval_scene, 60, 1]
 
             # Return full world + scene-consistent pieces
-            return full_world, pred_eval_local_scene, mask_eval_scene, eval_idx_scene
+            if return_types:
+                types = self.decode_types_from_scenario(data, b_idx, return_pred=False)
+                return full_world, pred_eval_local_scene, mask_eval_scene, eval_idx_scene, types
+            else:
+                return full_world, pred_eval_local_scene, mask_eval_scene, eval_idx_scene

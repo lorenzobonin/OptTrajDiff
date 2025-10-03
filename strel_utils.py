@@ -3,6 +3,12 @@ import torch
 from strel_advanced import Atom, Reach, Reach_vec, Reach_vec, Escape_vec, Globally, Eventually
 import time
 import math
+from torch_geometric.data import Data, Batch
+from av2.datasets.motion_forecasting.data_schema import (
+    ArgoverseScenario,
+    ObjectType,
+    TrackCategory,
+)
 
 def reshape_trajectories(pred: torch.Tensor, node_types: torch.Tensor) -> torch.Tensor:
     """
@@ -66,6 +72,26 @@ def clean_near_zero(t: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
 
 
 
+def decode_agent_types(graph, mask=None):
+
+    ids = graph['agent']['type'].detach().cpu().numpy().astype(int)
+
+    enum_members = sorted(list(ObjectType), key=lambda m: m.value)
+    one_based = {m.value: m.name for m in enum_members}
+    zero_based = {i: m.name for i, m in enumerate(enum_members)}
+
+    min_id, max_id = ids.min(), ids.max()
+    mapping = one_based if min_id >= 1 and max_id <= max(one_based.keys()) else zero_based
+
+    decoded = [mapping.get(i, "UNKNOWN") for i in ids]
+
+    if mask is not None:
+        mask_np = mask.detach().cpu().numpy().astype(bool)
+        decoded = [t for t, m in zip(decoded, mask_np) if m]
+
+    return decoded
+
+
 
 
 
@@ -118,7 +144,7 @@ def evaluate_reach_property(full_world: torch.Tensor, left_label: int, right_lab
     alpha = 20.0
     robustness = -(1/alpha) * torch.logsumexp(-alpha * reach_values.reshape(-1), dim=0)
     time_end = time.time()
-    print(f"Reach evaluation time: {time_end - time_start:.4f}")
+    #print(f"Reach evaluation time: {time_end - time_start:.4f}")
     return robustness
 
 
@@ -341,6 +367,7 @@ def evaluate_eg_reach_mask(
         full_world,
         mask_eval_scene,
         eval_idx_scene,
+        node_types,
         left_label,
         right_label,
         threshold_1,
@@ -358,7 +385,7 @@ def evaluate_eg_reach_mask(
     N, T, _ = full_world.shape
 
     # Node categories (adapt if you have heterogeneous agents)
-    node_types = torch.ones(N, device=device)
+    node_types = node_types
     traj = reshape_trajectories(full_world, node_types)   # [1, N, 6, T]
 
     # Atoms
