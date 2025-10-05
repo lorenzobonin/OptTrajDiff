@@ -42,10 +42,15 @@ class GenFromLatent(pl.LightningModule):
 
         # Choose STREL property
         if self.property_name == "reach":
-            robustness = sp.evaluate_eg_reach_mask(
+            robustness = sp.evaluate_eg_reach_adaptive(
                 full_world, mask_eval, eval_mask, self.node_types,
-                left_label=[0, 1], right_label=[0, 1, 2],
-                threshold_1=0.05, threshold_2=1.0, d_max=30
+                left_label=[0, 1], right_label=[0, 1, 2]
+            )
+
+        elif self.property_name == "reach_adapt":
+            robustness = sp.evaluate_eg_reach_adaptive(
+                full_world, mask_eval, eval_mask, self.node_types,
+                left_label=[0, 1], right_label=[0, 1, 2]
             )
 
         elif self.property_name == "safe_lane":
@@ -69,7 +74,7 @@ class GenFromLatent(pl.LightningModule):
             )
 
         elif self.property_name == "ped_some":
-            robustness = sp.evaluate_ped_somewhere_safe(
+            robustness = sp.evaluate_ped_somewhere_safe_adaptive(
                 full_world, mask_eval, eval_mask, self.node_types
             )
 

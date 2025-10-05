@@ -28,10 +28,49 @@ import numpy as np
 
 
 
+########################################################
+# SCENE STATISTICS FOR ADAPTIVE THRESHOLDING
+########################################################
+
+
+
+def get_scene_stats(traj):
+    """
+    Compute adaptive thresholds for STREL properties.
+    traj: [1, N, 6, T] reshaped tensor
+    """
+    _, N, F, T = traj.shape
+    vx, vy = traj[0, :, 2, :], traj[0, :, 3, :]
+    v_abs = traj[0, :, 4, :]
+
+    # Mean and std of absolute speeds (vehicles only if available)
+    mean_v = v_abs.mean().item()
+    std_v = v_abs.std().item()
+    max_v = v_abs.max().item()
+
+    # Pairwise distances at midpoint
+    t_mid = T // 2
+    coords = traj[0, :, 0:2, t_mid]
+    diff = coords.unsqueeze(1) - coords.unsqueeze(0)
+    dist = diff.norm(dim=-1)
+    triu = dist[torch.triu(torch.ones_like(dist), diagonal=1).bool()]
+    mean_d = triu.mean().item()
+    min_d = triu.min().item()
+    max_d = triu.max().item()
+
+    return {
+        "mean_v": mean_v, "std_v": std_v, "max_v": max_v,
+        "mean_d": mean_d, "min_d": min_d, "max_d": max_d
+    }
+
+
+
+
+
 
 
 ######################################################
-# BASIC PROPERTIES
+# BASIC PROPERTIES 
 ######################################################
 
 
@@ -465,6 +504,101 @@ def evaluate_safe_lane_keeping(full_world, mask_eval, eval_mask, node_types,
     robustness = -(1.0 / alpha) * torch.logsumexp(-alpha * selected.reshape(-1), dim=0)
 
     return robustness
+
+
+######################################################
+# ADAPTIVE PROPERTIES
+######################################################
+
+
+def evaluate_eg_reach_adaptive(full_world, mask_eval_scene, eval_idx_scene, node_types,
+                                    left_label, right_label):
+    """
+    Adaptive Eventually-Globally-Reach Property
+    A fast vehicle should eventually come close in front of a slow vehicle.
+    If no such pair exists, robustness is +inf (safe).
+    If such pairs exist but never satisfy the property, robustness is -inf (unsafe).
+    """
+    traj = su.reshape_trajectories(full_world, node_types)
+    stats = get_scene_stats(traj)
+
+    # Adaptive thresholds
+    threshold_1 = stats["mean_v"] + 0.5 * stats["std_v"]
+    threshold_2 = stats["mean_v"] - 0.5 * stats["std_v"]
+    d_max = 0.5 * stats["mean_d"]
+
+    fast_atom = Atom(var_index=4, threshold=threshold_1, lte=False)
+    slow_atom = Atom(var_index=4, threshold=threshold_2, lte=True)
+    reach = Reach_vec(fast_atom, slow_atom, d1=0.0, d2=d_max,
+                      left_label=left_label, right_label=right_label,
+                      distance_function="Front")
+
+    prop = Eventually(Globally(reach))
+    vals = prop.quantitative(traj, normalize=False).squeeze(2)[0]
+
+    full_mask = torch.zeros((traj.shape[1], traj.shape[3]), dtype=torch.bool, device=full_world.device)
+    full_mask[eval_idx_scene] = mask_eval_scene.squeeze(-1).bool()
+
+    vals_t0 = vals[:, 0]
+    mask_t0 = full_mask[:, 0]
+    selected = vals_t0[mask_t0]
+    if selected.numel() == 0:
+        return torch.tensor(0.0, device=full_world.device)
+    alpha = 20.0
+    return -torch.logsumexp(-alpha * selected.reshape(-1), dim=0) / alpha
+
+
+def evaluate_safe_follow_adaptive(full_world, mask_eval, eval_mask, node_types):
+    """
+    Adaptive Safe Following Property
+    A fast vehicle should always keep a safe distance from any vehicle in front.
+    """
+
+    traj = su.reshape_trajectories(full_world, node_types)
+    stats = get_scene_stats(traj)
+
+    v_thr = stats["mean_v"] + 0.5 * stats["std_v"]
+    d_safe = 0.3 * stats["mean_d"]
+
+    fast_atom = Atom(var_index=4, threshold=v_thr, lte=False, labels=[0])
+    veh_atom  = Atom(var_index=4, threshold=100.0, lte=True, labels=[0])
+    reach = Reach_vec(fast_atom, veh_atom, d1=0.0, d2=d_safe,
+                      distance_function="Front", left_label=[0], right_label=[0])
+
+    prop = Globally(Not(reach))
+    vals = prop.quantitative(traj, normalize=False).squeeze(2)[0]
+    full_mask = torch.zeros_like(vals, dtype=torch.bool)
+    full_mask[eval_mask] = mask_eval.squeeze(-1).bool()
+    selected = vals[full_mask]
+    if selected.numel() == 0:
+        return torch.tensor(0.0, device=full_world.device)
+    alpha = 20.0
+    return -torch.logsumexp(-alpha * selected.reshape(-1), dim=0) / alpha
+
+
+def evaluate_cyclist_yield_adaptive(full_world, mask_eval, eval_mask, node_types):
+    """
+    Adaptive Cyclist Yielding Property
+    A fast vehicle should eventually come close in front of a slow cyclist.
+    """
+    traj = su.reshape_trajectories(full_world, node_types)
+    stats = get_scene_stats(traj)
+
+    d_max = 0.4 * stats["mean_d"]
+
+    veh_atom = Atom(var_index=4, threshold=100.0, lte=True, labels=[0])
+    cyc_atom = Atom(var_index=4, threshold=100.0, lte=True, labels=[2])
+    reach = Reach_vec(veh_atom, cyc_atom, d1=0.0, d2=d_max,
+                      distance_function="Front", left_label=[0], right_label=[2])
+    prop = Eventually(Not(reach))
+    vals = prop.quantitative(traj, normalize=False).squeeze(2)[0]
+    full_mask = torch.zeros_like(vals, dtype=torch.bool)
+    full_mask[eval_mask] = mask_eval.squeeze(-1).bool()
+    selected = vals[full_mask]
+    if selected.numel() == 0:
+        return torch.tensor(0.0, device=full_world.device)
+    alpha = 20.0
+    return -torch.logsumexp(-alpha * selected.reshape(-1), dim=0) / alpha
 
 
 
