@@ -11,13 +11,10 @@ import os
 import torch
 import matplotlib.pyplot as plt
 
-import strel_utils as su
+import strel.strel_utils as su
+import strel.strel_properties as sp
 
 import copy
-
-
-
-
 
 
 
@@ -84,7 +81,7 @@ class GenFromLatent(pl.LightningModule):
         #robustness = su.toy_safety_function(full_world, min_dist=2.0)
         #robustness = su.evaluate_reach_property(full_world, left_label=1, right_label=1, threshold_1=3.0, threshold_2=3.0)
         #robustness = su.evaluate_reach_property_mask(full_world, mask_eval, eval_mask, left_label=1, right_label=1, threshold_1=3.0, threshold_2=3.0)
-        robustness = su.evaluate_eg_reach_mask(full_world, mask_eval, eval_mask, self.node_types, left_label=[0], right_label=[0], threshold_1=4.0, threshold_2=2.0, d_max=50)
+        robustness = sp.evaluate_eg_reach_mask(full_world, mask_eval, eval_mask, self.node_types, left_label=[0,1], right_label=[0,1,2], threshold_1=2.0, threshold_2=3.0, d_max=70)
         return robustness
 
 
@@ -209,16 +206,24 @@ if __name__ == '__main__':
 
     z_opt = su.grad_ascent_opt(qmodel = gen_model, z0 = x_T, lr=0.005, tol=1e-12)
 
+    z_reg = su.grad_ascent_reg(qmodel = gen_model, z0 = x_T, lr=0.005, tol=1e-12, lambda_reg=0.01)
+
     print("Initial latent point:", x_T)
     print("Optimal latent point:", z_opt)
     
     print("Initial robustness:", robust.item())
     robust_opt = gen_model(z_opt)
     print("Optimal robustness:", robust_opt.item())
+
+    robust_reg = gen_model(z_reg)
+    print("Optimal robustness:", robust_reg.item())
     
             
     r2_init, r2_opt, dlogp = su.latent_loglik_diff(z_param, z_opt)
     print("Initial vs optimal loglik diff:", r2_init, r2_opt, dlogp)
+
+    r2_init, r2_opt, dlogp = su.latent_loglik_diff(z_param, z_reg)
+    print("Initial vs reg optimal loglik diff:", r2_init, r2_opt, dlogp)
 
     #model.latent_generator(x_T, i, plot=True, enable_grads=False, return_pred_only=False)
 
@@ -226,6 +231,8 @@ if __name__ == '__main__':
     model.latent_generator(x_T, i, plot=True, enable_grads=False, return_pred_only=True, exp_id= "_init")
 
     model.latent_generator(z_opt, i, plot=True, enable_grads=False, return_pred_only=True, exp_id= "_opt")
+
+    model.latent_generator(z_reg, i, plot=True, enable_grads=False, return_pred_only=True, exp_id= "_reg")
             
     #print(model.cond_data['agent']['predict_mask'].sum()) # should be equal to num_agents
     #print(model.cond_data['agent']['valid_mask'].sum())

@@ -1,6 +1,14 @@
 __pycache__/
 lightning_logs/
+reach/
+safe_lane/
+ped_some/
+outputs_reach/
+outputs_ped_some/
+outputs_safe_lane/
 /*.out
+/*.err
 /*.sh
 /*.yml
+/*.slurm
 visual/

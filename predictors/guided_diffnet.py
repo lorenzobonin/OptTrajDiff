@@ -281,7 +281,9 @@ class GuidedDiffNet(DiffNet):
         goal_point,
         num_scenes,
         num_agents_per_scene,
-        exp_id = ""
+        exp_id = "",
+        img_folder='visual',
+        sub_folder='opd_method'
     ):
         """Handles only the plotting/visualization logic for latent_generator."""
 
@@ -325,8 +327,8 @@ class GuidedDiffNet(DiffNet):
                                         rot_mat.unsqueeze(1)) + origin_eval[:, :2].reshape(-1, 1, 1, 2)
         goal_point_world = goal_point_world.squeeze(1).squeeze(1).detach().cpu().numpy()
 
-        img_folder = 'visual'
-        sub_folder = 'opd_method'
+        img_folder = img_folder
+        sub_folder = sub_folder
         rec_traj_world_np = rec_traj_world.detach().cpu().numpy()
 
         for i in range(num_scenes):
@@ -383,7 +385,14 @@ class GuidedDiffNet(DiffNet):
             visualize_scenario_prediction(scenario, static_map, additional_traj, traj_visible, viz_save_path, show_legend = True)
 
 
-    def latent_generator(self, latent_point, b_idx, plot=False, enable_grads=False, return_pred_only=True,exp_id = "", return_types=False):
+    def latent_generator(self, latent_point,
+                          b_idx, plot=False,
+                            enable_grads=False, 
+                            return_pred_only=True,
+                            exp_id = "",
+                              return_types=False,
+                              img_folder='visual',
+                              sub_folder='opd_method'):
         """Runs diffusion from a latent and reconstructs trajectories."""
         if self.cond_data is None:
             raise RuntimeError("cond_data must be set before calling latent_generator().")
@@ -552,7 +561,8 @@ class GuidedDiffNet(DiffNet):
                     b_idx=b_idx, data=data, eval_mask=eval_mask,
                     traj_refine=traj_refine, rec_traj=rec_traj,
                     gt_eval=gt_eval, gt_no_pred=gt_no_pred, goal_point=goal_point,
-                    num_scenes=num_scenes, num_agents_per_scene=num_agents_per_scene, exp_id = exp_id
+                    num_scenes=num_scenes, num_agents_per_scene=num_agents_per_scene,
+                      exp_id = exp_id, img_folder=img_folder, sub_folder=sub_folder
                 )
 
             
@@ -618,6 +628,8 @@ class GuidedDiffNet(DiffNet):
             mask_eval_scene = mask_eval_all[scene_positions_in_eval]              # [N_eval_scene, 60, 1]
 
             # Return full world + scene-consistent pieces
+            full_world = smooth_stop_poly(full_world, max_step=10.0)
+
             if return_types:
                 types = self.decode_types_from_scenario(data, b_idx, return_pred=False)
                 return full_world, pred_eval_local_scene, mask_eval_scene, eval_idx_scene, types

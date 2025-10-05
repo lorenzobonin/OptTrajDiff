@@ -1,6 +1,6 @@
 
 import torch
-from strel_advanced import Atom, Reach, Reach_vec, Reach_vec, Escape_vec, Globally, Eventually
+from strel.strel_advanced import Atom, Reach, Reach_vec, Reach_vec, Escape_vec, Globally, Eventually
 import time
 import math
 from torch_geometric.data import Data, Batch
@@ -37,59 +37,6 @@ def reshape_trajectories(pred: torch.Tensor, node_types: torch.Tensor) -> torch.
 
     return trajectory
 
-
-def impute_positions_closest(pred: torch.Tensor) -> torch.Tensor:
-    """
-    pred: [N,T,2] with (0,0) for invalid agents
-    Returns: imputed [N,T,2] where invalids are filled with nearest valid (forward+backward).
-    """
-    device, dtype = pred.device, pred.dtype
-    N, T, D = pred.shape
-    assert D == 2, "Expected positions with 2D coordinates"
-
-    invalid = (pred.abs().sum(-1) == 0)  # [N,T] boolean
-    imputed = pred.clone()
-
-    # --- Forward fill ---
-    last_valid = pred[:,0:1,:]  # [N,1,2]
-    for t in range(1,T):
-        last_valid = torch.where(invalid[:,t:t+1].unsqueeze(-1), last_valid, pred[:,t:t+1,:])
-        imputed[:,t:t+1,:] = torch.where(invalid[:,t:t+1].unsqueeze(-1), last_valid, pred[:,t:t+1,:])
-
-    # --- Backward fill ---
-    first_valid = pred[:,-1:,:]  # start from end
-    for t in range(T-2,-1,-1):
-        first_valid = torch.where(invalid[:,t:t+1].unsqueeze(-1), first_valid, pred[:,t:t+1,:])
-        imputed[:,t:t+1,:] = torch.where(invalid[:,t:t+1].unsqueeze(-1), first_valid, imputed[:,t:t+1,:])
-
-    return imputed
-
-def clean_near_zero(t: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
-    """
-    Replace very small values (|x| < eps) with 0, preserving gradient flow.
-    """
-    return torch.where(t.abs() < eps, torch.zeros_like(t), t)
-
-
-
-def decode_agent_types(graph, mask=None):
-
-    ids = graph['agent']['type'].detach().cpu().numpy().astype(int)
-
-    enum_members = sorted(list(ObjectType), key=lambda m: m.value)
-    one_based = {m.value: m.name for m in enum_members}
-    zero_based = {i: m.name for i, m in enumerate(enum_members)}
-
-    min_id, max_id = ids.min(), ids.max()
-    mapping = one_based if min_id >= 1 and max_id <= max(one_based.keys()) else zero_based
-
-    decoded = [mapping.get(i, "UNKNOWN") for i in ids]
-
-    if mask is not None:
-        mask_np = mask.detach().cpu().numpy().astype(bool)
-        decoded = [t for t, m in zip(decoded, mask_np) if m]
-
-    return decoded
 
 
 
@@ -250,6 +197,91 @@ def grad_ascent_opt(qmodel, z0, lr=0.01, tol=1e-4, max_steps=300, verbose=True):
 
 
 
+def grad_ascent_reg(qmodel, z0, lr=0.01, tol=1e-4, max_steps=300, verbose=True, lambda_reg=0.0):
+    """
+    Gradient ascent in diffusion latent space to maximize robustness,
+    with optional regularization on latent likelihood (Gaussian prior).
+    
+    Args:
+        qmodel: function(z) -> robustness scalar
+        z0: initial latent point (tensor)
+        lr: learning rate
+        tol: gradient stopping tolerance
+        max_steps: max iterations
+        verbose: print debug info
+        lambda_reg: weight for log-prior regularization (>=0 encourages staying near origin)
+    """
+    # Trainable latent point
+    z_param = torch.nn.Parameter(z0.detach().clone())
+    opt = torch.optim.Adam([z_param], lr=lr)
+
+    if verbose:
+        with torch.no_grad():
+            start = qmodel(z_param)
+            if start.numel() > 1:
+                start = start.mean()
+            print("Starting robustness:", start.item())
+
+    for step in range(max_steps):
+        opt.zero_grad()
+
+        robustness = qmodel(z_param)
+        if robustness.numel() > 1:
+            robustness = robustness.mean()
+
+        # Gaussian log-prior term: -0.5 * ||z||^2
+        log_prior = -0.5 * torch.sum(z_param ** 2) / z_param.shape[0]
+
+        # Combined objective
+        objective = robustness + lambda_reg * log_prior
+
+        # Negative because we use Adam (minimizer)
+        loss = -objective
+        loss.backward()
+
+        grad_inf = z_param.grad.detach().abs().max()
+        if grad_inf < tol:
+            if verbose:
+                print(f"Stopping at step {step}, grad_inf_norm={grad_inf.item():.2e}")
+            break
+
+        opt.step()
+
+        if verbose and (step + 1) % 50 == 0:
+            print(f"Step {step+1}: robustness={robustness.item():.6f}, "
+                  f"log_prior={log_prior.item():.6f}, objective={objective.item():.6f}")
+
+    if verbose:
+        print("------------- Optimal robustness =", robustness.item())
+        r2_a, r2_b, delta_logp = latent_loglik_diff(z0, z_param)
+        print(f"Latent ||z||^2: start={r2_a:.3f}, final={r2_b:.3f}, "
+              f"delta_logp={delta_logp:.3f} nats")
+    return z_param.detach()
+
+
+def optimize_samples_individually(qmodel, z0, lr=0.01, tol=1e-4, max_steps=150, lambda_reg=0.0, verbose=False):
+    """
+    z0: [num_agents, num_samples, dim]
+    Optimizes each sample s independently: z[:, s, :].
+    Returns z_opt with same shape.
+    """
+    assert z0.dim() == 3, "expected z0 shape [num_agents, num_samples, dim]"
+    A, S, D = z0.shape
+    z_opt = z0.clone()
+
+    for s in range(S):
+        z_s = z0[:, s:s+1, :].contiguous()              # keep sample axis = 1
+        z_s_opt = grad_ascent_reg(
+            qmodel=qmodel, z0=z_s, lr=lr, tol=tol, max_steps=max_steps,
+            lambda_reg=lambda_reg, verbose=verbose
+        )
+        z_opt[:, s:s+1, :] = z_s_opt
+    return z_opt
+
+
+
+
+
 def toy_safety_function(full_world, min_dist=2.0):
     """
     Toy robustness: check pairwise distances between all agents over time.
@@ -310,126 +342,6 @@ def masked_min_robustness(reach_vals, reg_mask, eval_mask, soft_tau=None):
         robust = -(1.0 / soft_tau) * torch.logsumexp(-soft_tau * z, dim=0)
 
     return robust
-
-
-
-def evaluate_reach_property_mask(full_world,
-                                 mask_eval_scene,
-                                 eval_idx_scene,
-                                 left_label,
-                                 right_label,
-                                 threshold_1,
-                                 threshold_2):
-    """
-    full_world      : [N_total, T, 2]  (all agents of the scene)
-    mask_eval_scene : [N_eval_scene, T, 1]  (predicted slots for the scene's eval agents)
-    eval_idx_scene  : [N_eval_scene]  (row indices in full_world for those eval agents)
-    """
-    time_start = time.time()
-    device = full_world.device
-    N, T, _ = full_world.shape
-
-    # If you want dynamic/static labels, build them here from your categories.
-    # For now, mark everyone as 1 (adapt as needed).
-    node_types = torch.ones(N, device=device)
-
-    traj = reshape_trajectories(full_world, node_types)   # [1, N, 6, T]
-
-    # STREL atoms (example on |v|)
-    safevel_atom = Atom(var_index=4, threshold=threshold_1, lte=True)
-    true_atom    = Atom(var_index=4, threshold=threshold_2, lte=True)
-
-    reach = Reach_vec(
-        safevel_atom, true_atom,
-        d1=0.0, d2=1e6, is_unbounded=True,   # unbounded to avoid "no eligible dest" -inf traps
-        left_label=left_label,
-        right_label=right_label,
-        distance_function="Front"
-    )
-
-    reach_values = reach.quantitative(traj).squeeze(2)[0]   # [N, T]
-
-    # Build a full [N,T] boolean mask with predicted slots only for the scene's eval agents
-    full_mask = torch.zeros((N, T), dtype=torch.bool, device=device)
-    full_mask[eval_idx_scene] = mask_eval_scene.squeeze(-1).bool()     # [N_eval_scene,T] → rows in [N,T]
-
-    # Reduce only over predicted entries
-    vals = reach_values[full_mask]                                     # [num_predicted_entries]
-    alpha = 10.0
-    robustness = -(1.0/alpha) * torch.logsumexp(-alpha * vals.reshape(-1), dim=0)
-    time_end = time.time()
-    print(f"Reach evaluation time: {time_end - time_start:.4f}")
-    return robustness
-
-
-
-def evaluate_eg_reach_mask(
-        full_world,
-        mask_eval_scene,
-        eval_idx_scene,
-        node_types,
-        left_label,
-        right_label,
-        threshold_1,
-        threshold_2,
-        d_max=50.0):
-    """
-    Property: Eventually Globally ( node of left_label with vel > threshold_1
-                                    reaches (Front distance, <= d_max)
-                                    node of right_label with vel < threshold_2 )
-
-    Robustness is computed at t=0.
-    """
-    time_start = time.time()
-    device = full_world.device
-    N, T, _ = full_world.shape
-
-    # Node categories (adapt if you have heterogeneous agents)
-    node_types = node_types
-    traj = reshape_trajectories(full_world, node_types)   # [1, N, 6, T]
-
-    # Atoms
-    fast_atom   = Atom(var_index=4, threshold=threshold_1, lte=False)  # vel > thr1
-    slow_atom   = Atom(var_index=4, threshold=threshold_2, lte=True)   # vel < thr2
-
-    # Spatial reach with FRONT distance
-    reach = Reach_vec(
-        left_child=fast_atom,
-        right_child=slow_atom,
-        d1=0.0, d2=d_max,
-        is_unbounded=False,
-        left_label=left_label,
-        right_label=right_label,
-        distance_function="Front"
-    )
-
-    # Temporal nesting: Eventually(Globally(Reach))
-    glob = Globally(reach)
-    evgl = Eventually(glob)
-
-    # Quantitative semantics
-    vals = evgl.quantitative(traj, normalize=False)  # [B,N,1,T]
-    vals = vals.squeeze(2)[0]                        # [N,T]
-
-    # Masking: only predicted entries
-    full_mask = torch.zeros((N, T), dtype=torch.bool, device=device)
-    full_mask[eval_idx_scene] = mask_eval_scene.squeeze(-1).bool()
-
-    # Evaluate robustness only at t=0
-    #   -> take all eval agents at time 0 that are predicted
-    vals_t0 = vals[:, 0]
-    mask_t0 = full_mask[:, 0]
-    selected = vals_t0[mask_t0]
-
-    if selected.numel() == 0:
-        robustness = torch.tensor(0.0, device=device)
-    else:
-        alpha = 20.0
-        robustness = -(1.0/alpha) * torch.logsumexp(-alpha * selected.reshape(-1), dim=0)
-
-    time_end = time.time()
-    print(f"Eventually-Globally-Reach eval time: {time_end - time_start:.4f}")
-    return robustness
 
 
 
