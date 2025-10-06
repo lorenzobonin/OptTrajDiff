@@ -73,7 +73,7 @@ if __name__ == '__main__':
                      transform=TargetBuilder(model.num_historical_steps, model.num_future_steps))
 
     top_num_agents_scenarios = [(28, 18070), (25, 7520), (24, 11135), (23, 4611), (22, 23297), (20, 6323), (20, 7129), (19, 1359), (19, 6569), (19, 6937)]
-    top_diversity_scenarios = [(10, 8709), (10, 9817), (9, 4433), (9, 7391), (9, 7928), (9, 9290), (9, 9738), (9, 10302), (9, 10863), (9, 12518)]
+    top_diversity_scenarios = [(11, 8709), (6, 9817), (7, 4433), (1, 7391), (10, 7928), (3, 9290), (3, 9738), (5, 10302), (9, 10863), (1, 12518)]
 
     num_samples = 20
 
@@ -87,22 +87,15 @@ if __name__ == '__main__':
         x_T = torch.randn([num_agents, num_samples, num_dim])
         pred = model.latent_generator(x_T, idx, plot=True)
 
-    # for _, idx in top_diversity_scenarios:
+    for num_agents, idx in top_diversity_scenarios:
         
-    #     first_graph = test_dataset[idx]
+        first_graph = test_dataset[idx]
+        first_graph = Batch.from_data_list([first_graph])
 
-    #     # print(first_graph)
-    #     # Turn it back into a HeteroDataBatch object (the only one working)
-    #     first_graph = Batch.from_data_list([first_graph])
-
-    #     model.cond_data = first_graph
-
-    #     # Getting an input with the right dimensionality
-    #     #num_agents = 5 # Number of predictable trajectories in the batch
-    #     num_dim = 10 # Latent dim
-    #     x_T = torch.randn([5, 1, num_dim])
-    #     pred = model.latent_generator(x_T, idx, plot=True)
-
+        model.cond_data = first_graph
+        num_dim = 10
+        x_T = torch.randn([num_agents, num_samples, num_dim])
+        pred = model.latent_generator(x_T, idx, plot=True)
 
         # print(pred) # [num_agents x samples x timesteps x output_dim (2D position)]
         # print(pred) # [num_agents x samples x timesteps x output_dim (2D position)]

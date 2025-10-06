@@ -505,7 +505,7 @@ class GuidedDiffNet(DiffNet):
             std = torch.ones_like(marg_std)
         else:
             mean = marg_mean
-            std = marg_std      
+            std = marg_std
 
         # Diffusion from latent (eval agents only)
         self.joint_diffusion.eval()
