@@ -77,6 +77,19 @@ class GenFromLatent(pl.LightningModule):
             robustness = sp.evaluate_ped_somewhere_safe_adaptive(
                 full_world, mask_eval, eval_mask, self.node_types
             )
+        elif self.property_name == "ped_yield":
+            robustness = sp.evaluate_ped_front_yield_adaptive(
+                full_world, mask_eval, eval_mask, self.node_types
+            )
+
+        elif self.property_name == "veh_space":
+            robustness = sp.evaluate_vehicle_spacing(
+                full_world, mask_eval, eval_mask, self.node_types
+            )
+        elif self.property_name == "ped_clear":
+            robustness = sp.evaluate_pedestrian_clearance(
+                full_world, mask_eval, eval_mask, self.node_types
+            )
 
         else:
             raise ValueError(f"Unknown property type '{self.property_name}'")
@@ -128,8 +141,8 @@ if __name__ == '__main__':
     parser.add_argument('--cost_param_threl', type = float, default = 1.0)
     # === Optimization-specific arguments ===
     parser.add_argument('--property', type=str, default='reach',
-                        choices=['reach', 'safe_lane', 'cyclist_yield', 'heading_stable', 'safe_lane', 'ped_some'])
-    parser.add_argument('--num_samples', type=int, default=10)
+                        choices=['reach', 'safe_lane', 'cyclist_yield', 'heading_stable', 'safe_lane', 'ped_some','ped_yield','reach_adapt', 'veh_space','ped_clear'])
+    parser.add_argument('--num_samples', type=int, default=20)
     parser.add_argument('--lambda_reg', type=float, default=0.01)
     parser.add_argument('--lr', type=float, default=0.005)
     parser.add_argument('--tol', type=float, default=1e-8)
@@ -163,11 +176,13 @@ if __name__ == '__main__':
     )
 
     # Example list of scenarios
-    top_num_agents_scenarios = [
-         (25, 7520), (24, 11135), (23, 4611),
-         (20, 6323),
-        (19, 1359), (19, 6937)
-    ]
+    # top_num_agents_scenarios = [
+    #      (25, 7520), (24, 11135), (23, 4611),
+    #      (20, 6323),
+    #     (19, 1359), (19, 6937)
+    # ]
+
+    top_num_agents_scenarios = [(19, 6937)]
 
     num_dim = 10
     save_dir = f"outputs_{args.property}"
@@ -201,11 +216,17 @@ if __name__ == '__main__':
     
         full_world, pred_eval_local, mask_eval, eval_mask, node_types = model.latent_generator(x_T, scen_idx, plot=False, enable_grads=True, return_pred_only=False, return_types=True)
         
+        rec_pred, pred_types = model.latent_generator(x_T, scen_idx, plot=False, enable_grads=True, return_pred_only=True, return_types=True)
 
 
         full_reshaped = su.reshape_trajectories(full_world, node_types)
 
+        print("Full world summary:")
         su.summarize_reshaped(full_reshaped)
+
+        loc_reshaped = su.reshape_trajectories(rec_pred, pred_types)
+        print("Reconstructed prediction summary:")
+        su.summarize_reshaped(loc_reshaped)
 
         z0 = torch.randn([num_agents, args.num_samples, num_dim], device=args.device)
 

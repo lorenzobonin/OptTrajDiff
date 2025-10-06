@@ -600,6 +600,18 @@ class GuidedDiffNet(DiffNet):
             rot_all[:, 1, 0] = -sin_all
             rot_all[:, 1, 1] = cos_all
 
+            origin_eval = data['agent']['position'][eval_mask, self.num_historical_steps - 1]
+            theta_eval = data['agent']['heading'][eval_mask, self.num_historical_steps - 1]
+            cos, sin = theta_eval.cos(), theta_eval.sin()
+            rot_mat = torch.zeros(eval_mask.sum(), 2, 2, device=self.device)
+            rot_mat[:, 0, 0] = cos
+            rot_mat[:, 0, 1] = sin
+            rot_mat[:, 1, 0] = -sin
+            rot_mat[:, 1, 1] = cos
+
+            rec_traj_world = torch.matmul(rec_traj[:, :, :, :2], rot_mat.unsqueeze(1)) \
+                            + origin_eval[:, :2].reshape(-1, 1, 1, 2)
+
             full_world = torch.einsum('ntc,ncd->ntd', full_local, rot_all) \
                         + origin_all[:, :2].unsqueeze(1)   # [N_total, 60, 2]
 
@@ -626,12 +638,12 @@ class GuidedDiffNet(DiffNet):
             # Slice predicted things to scene only
             pred_eval_local_scene = pred_eval_local_all[scene_positions_in_eval]  # [N_eval_scene, 60, 2]
             mask_eval_scene = mask_eval_all[scene_positions_in_eval]              # [N_eval_scene, 60, 1]
-
+            rec_traj_scene = rec_traj_world.squeeze(1)
             # Return full world + scene-consistent pieces
             full_world = smooth_stop_poly(full_world, max_step=10.0)
 
             if return_types:
                 types = self.decode_types_from_scenario(data, b_idx, return_pred=False)
-                return full_world, pred_eval_local_scene, mask_eval_scene, eval_idx_scene, types
+                return full_world, rec_traj_scene, mask_eval_scene, eval_idx_scene, types
             else:
-                return full_world, pred_eval_local_scene, mask_eval_scene, eval_idx_scene
+                return full_world, rec_traj_scene, mask_eval_scene, eval_idx_scene

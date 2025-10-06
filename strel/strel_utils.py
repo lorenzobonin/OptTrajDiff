@@ -38,6 +38,19 @@ def reshape_trajectories(pred: torch.Tensor, node_types: torch.Tensor) -> torch.
     return trajectory
 
 
+def align_temporal_dimensions(vals, mask_eval):
+    """
+    Align time dimensions between property output and mask.
+    Handles off-by-one errors caused by temporal operators (e.g. finite differences).
+    Returns trimmed (vals, mask_eval).
+    """
+    T_vals = vals.shape[1]
+    T_mask = mask_eval.shape[1]
+    if T_vals != T_mask:
+        min_T = min(T_vals, T_mask)
+        vals = vals[:, :min_T]
+        mask_eval = mask_eval[:, :min_T, :]
+    return vals, mask_eval
 
 
 
@@ -271,6 +284,10 @@ def optimize_samples_individually(qmodel, z0, lr=0.01, tol=1e-4, max_steps=150, 
 
     for s in range(S):
         z_s = z0[:, s:s+1, :].contiguous()              # keep sample axis = 1
+        if qmodel(z_s) < - 1000 or qmodel(z_s) > 1000:  # skip very negative or very large
+            if verbose:
+                print(f"Skipping sample {s} with initial robustness {qmodel(z_s).item():.6f}")
+            continue
         z_s_opt = grad_ascent_reg(
             qmodel=qmodel, z0=z_s, lr=lr, tol=tol, max_steps=max_steps,
             lambda_reg=lambda_reg, verbose=verbose

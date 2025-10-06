@@ -58,7 +58,7 @@ def _compute_euclidean_distance_matrix(x: torch.Tensor) -> torch.Tensor:
 
 
 def _compute_directional_distance_matrix(x: torch.Tensor, mode: str,
-                                         side_thresh: float = 3.0) -> torch.Tensor:
+                                         side_thresh: float = 2.0) -> torch.Tensor:
     """
     Directional distance with side-threshold.
     x: [B,N,F,T], where [x,y,vx,vy,...].
