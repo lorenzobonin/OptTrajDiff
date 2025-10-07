@@ -167,8 +167,8 @@ def evaluate_eg_reach_mask(
     traj = su.reshape_trajectories(full_world, node_types)   # [1, N, 6, T]
 
     # Atoms
-    fast_atom   = Atom(var_index=4, threshold=threshold_1, lte=False, labels=right_label)  # vel > thr1
-    slow_atom   = Atom(var_index=4, threshold=threshold_2, lte=True, labels=left_label)   # vel < thr2
+    fast_atom   = Atom(var_index=4, threshold=threshold_1, lte=False)  # vel > thr1
+    slow_atom   = Atom(var_index=4, threshold=threshold_2, lte=True)   # vel < thr2
 
     # Spatial reach with FRONT distance
     reach = Reach(
@@ -205,8 +205,8 @@ def evaluate_eg_reach_mask(
     else:
         #!!! check su valore esatto della robustness
         alpha = 20.0
-        #robustness = (1.0/alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
-        robustness = torch.sum(selected)
+        robustness = (1.0/alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
+        #robustness = torch.sum(selected)
     #time_end = time.time()
     #print(f"Eventually-Globally-Reach eval time: {time_end - time_start:.4f}")
     return robustness
@@ -223,14 +223,7 @@ def evaluate_simple_reach(
         threshold_2,
         d_max=50.0):
     """
-    Property: Eventually Globally ( node of left_label with vel > threshold_1
-                                    reaches (Front distance, <= d_max)
-                                    node of right_label with vel < threshold_2 )
-    So a vehicle with high speed eventually comes close in front of a slow vehicle.
-    If no such pair exists, robustness is +inf (safe).
-    If such pairs exist but never satisfy the property, robustness is -inf (unsafe).
-    If some pairs satisfy the property, robustness is smooth min over them.
-    Robustness is computed at t=0.
+    Property: 
     """
     time_start = time.time()
     device = full_world.device
@@ -241,8 +234,8 @@ def evaluate_simple_reach(
     traj = su.reshape_trajectories(full_world, node_types)   # [1, N, 6, T]
 
     # Atoms
-    fast_atom   = Atom(var_index=4, threshold=threshold_1, lte=False, labels=right_label)  # vel > thr1
-    slow_atom   = Atom(var_index=4, threshold=threshold_2, lte=True, labels=left_label)   # vel < thr2
+    fast_atom   = Atom(var_index=4, threshold=threshold_1, lte=False, labels=left_label)  # vel > thr1
+    slow_atom   = Atom(var_index=4, threshold=threshold_2, lte=True, labels=right_label)   # vel < thr2
 
     # Spatial reach with FRONT distance
     reach = Reach(
@@ -255,9 +248,6 @@ def evaluate_simple_reach(
         distance_function="Euclid"
     )
 
-    # Temporal nesting: Eventually(Globally(Reach))
-    #glob = Globally(reach)
-    ###!!!! check if correct
 
     # Quantitative semantics
     vals = reach.quantitative(traj, normalize=True)  # [B,N,1,T]
@@ -279,10 +269,10 @@ def evaluate_simple_reach(
         #!!! check su valore esatto della robustness
         alpha = 20.0
         robustness = (1.0/alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
-        #robustness = torch.max(selected)
+        robustness = torch.max(selected)
     #time_end = time.time()
     #print(f"Eventually-Globally-Reach eval time: {time_end - time_start:.4f}")
-    robustness = torch.sum(selected)
+    #robustness = torch.sum(selected)
     return robustness
 
 
@@ -317,8 +307,8 @@ def evaluate_eg_reach(
     traj = su.reshape_trajectories(full_world, node_types)   # [1, N, 6, T]
 
     # Atoms
-    fast_atom   = Atom(var_index=4, threshold=threshold_1, lte=False, labels=right_label)  # vel > thr1
-    slow_atom   = Atom(var_index=4, threshold=threshold_2, lte=True, labels=left_label)   # vel < thr2
+    fast_atom   = Atom(var_index=4, threshold=threshold_1, lte=False, labels=left_label)  # vel > thr1
+    slow_atom   = Atom(var_index=4, threshold=threshold_2, lte=True, labels=right_label)   # vel < thr2
 
     # Spatial reach with FRONT distance
     reach = Reach(
@@ -352,11 +342,11 @@ def evaluate_eg_reach(
     else:
         #!!! check su valore esatto della robustness
          alpha = 20.0
-         #robustness = (1.0/alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
+         robustness = (1.0/alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
         #robustness = torch.max(selected)
     #time_end = time.time()
     #print(f"Eventually-Globally-Reach eval time: {time_end - time_start:.4f}")
-    robustness = torch.sum(selected)
+    #robustness = torch.sum(selected)
     return robustness
 
 
@@ -437,63 +427,101 @@ def evaluate_surround(full_world, mask_eval, eval_mask, node_types, d_sur=8.0):
     return torch.logsumexp(alpha * selected.reshape(-1), dim=0) / alpha
 
 
-def evaluate_ped_somewhere_unsafe(full_world, mask_eval, eval_mask, node_types, d_zone=20.0):
+def evaluate_ped_somewhere_unsafe_mask(
+        full_world,
+        mask_eval_scene,
+        eval_idx_scene,
+        node_types,
+        d_zone=20.0):
     """
-    Property: pedestrians are unsafe if they ever come within d_zone of a vehicle.
+    Pedestrians are unsafe if they ever come within d_zone of a vehicle.
 
-    Robustness:
-      > 0 → pedestrians remain safe (no close encounter)
-      < 0 → at some point, a pedestrian is too close to a vehicle
-      = +1 → no pedestrians present (vacuously safe)
+    Quantitative robustness (>0 => unsafe exists):
+      > 0 → there exists a time/agent where a pedestrian is too close to a vehicle
+      < 0 → no such encounter (safe)
+      = 0 → neutral (e.g., no predicted entries)
     """
-
     device = full_world.device
-    traj = su.reshape_trajectories(full_world, node_types)
+    N, T, _ = full_world.shape
 
-    # Define relevant agent groups
-    ped_labels = [Agent.PEDESTRIAN]
-    veh_labels = [Agent.VEHICLE, Agent.CYCLIST, Agent.MOTORCYCLIST, Agent.BUS]
+    # 1) STREL signal
+    traj = su.reshape_trajectories(full_world, node_types)  # [1, N, 6, T]
 
-    ped_atom = Atom(var_index=4, threshold=0.0, lte=False, labels=ped_labels)
-    veh_atom = Atom(var_index=4, threshold=0.01, lte=False, labels=veh_labels)
+    # 2) Define reach: ped within d_zone of a vehicle
+    #    (leave labels in the operator; atoms just select feature)
+    ped_labels = [1,2]
+    veh_labels = [0,2,3]
 
-    # Pedestrian-vehicle closeness within Euclidean distance d_zone
+    ped_atom = Atom(var_index=4, threshold=0.0,  lte=False)   # "moving" ped (speed > 0)
+    veh_atom = Atom(var_index=4, threshold=0.01, lte=False)   # "moving" veh-like
+
     reach = Reach(
         left_child=ped_atom,
         right_child=veh_atom,
+        d1=0.0, d2=d_zone,
+        is_unbounded=False,
+        left_label=ped_labels,
+        right_label=veh_labels,
+        distance_function="Euclid",
+    )
+
+    # 3) Eventually: ∃t where a ped is within d_zone of a vehicle
+    prop = Eventually(reach, right_time_bound=T - 1)
+
+    # 4) Quantitative semantics
+    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]  # shape can be [N, T'] or [N, 1]
+
+    # 5) Align temporal dims if needed (handles T' != T)
+    #    su.align_temporal_dimensions expects vals [N, Tv] and mask [N, Tm, 1]
+    if vals.shape[1] != mask_eval_scene.shape[1]:
+        vals, mask_eval_scene = su.align_temporal_dimensions(vals, mask_eval_scene)
+
+    Tv = vals.shape[1]  # aligned time length (often 1 for Eventually)
+
+    # 6) Build full mask over agents/timesteps, then pick t=0 like your working function
+    full_mask = torch.zeros((N, Tv), dtype=torch.bool, device=device)
+    full_mask[eval_idx_scene] = mask_eval_scene.squeeze(-1).bool()
+
+    vals_t0 = vals[:, 0]        # [N]
+    mask_t0 = full_mask[:, 0]   # [N]
+    selected = vals_t0[mask_t0] # predicted-at-t0 entries only
+
+    # 7) Aggregate (soft max → “there exists unsafe”)
+    if selected.numel() == 0:
+        return torch.tensor(0.0, device=device)
+
+    alpha = 20.0
+    robustness = (1.0 / alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
+    return robustness
+
+
+
+
+def evaluate_ped_somewhere_unmask_debug(full_world, node_types, d_zone=20.0):
+    traj = su.reshape_trajectories(full_world, node_types)
+    print("Unique types:", torch.unique(node_types))
+    print("Positions range:", traj[0,:,0:2,:].min(), traj[0,:,0:2,:].max())
+    print("|v| stats:", traj[0,:,4,:].mean(), traj[0,:,4,:].max())
+
+    ped_labels = [1,2]
+    veh_labels = [0,2,3]
+
+    print('ped labels', ped_labels)
+    print('veh_labels', veh_labels)
+
+    # !!! cambia mettendo label solo nella formula
+    reach = Reach(
+        left_child=Atom(4, 0.0, lte=False),
+        right_child=Atom(4, 0.01, lte=False),
         d1=0.0, d2=d_zone,
         distance_function="Euclid",
         left_label=ped_labels,
         right_label=veh_labels
     )
-    
-
-
-    # Unsafe condition: eventually some pedestrian is near a vehicle
-    prop_unsafe = Eventually(reach, right_time_bound=full_world.shape[1] - 1)
-    
-
-    # Safe property is the negation
-
-
-    # Quantitative evaluation
-    vals = prop_unsafe.quantitative(traj, normalize=True).squeeze(2)[0]
-
-    # Align temporal dimensions if needed
-    T_vals, T_mask = vals.shape[1], mask_eval.shape[1]
-    if T_vals != T_mask:
-        min_T = min(T_vals, T_mask)
-        vals, mask_eval = vals[:, :min_T], mask_eval[:, :min_T, :]
-
-    # Select only evaluated agents/timesteps
-    full_mask = torch.zeros_like(vals, dtype=torch.bool)
-    full_mask[eval_mask] = mask_eval.squeeze(-1).bool()
-    selected = vals[full_mask]
-
-    # Smooth aggregation (soft maximum)
-    alpha = 20.0
-    robustness = (1.0 / alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
-    return robustness
+    prop = Eventually(reach, right_time_bound=full_world.shape[1]-1)
+    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]
+    print("vals min/max:", vals.min(), vals.max())
+    return (1.0/20.0)*torch.logsumexp(20.0*vals.reshape(-1), dim=0)
 
 
 
@@ -680,8 +708,8 @@ def evaluate_accel_surrounded(full_world, node_types,
         right_child=neigh_brake,
         d2=d_zone,
         distance_function="Euclid",
-        left_labels=[0],
-        right_labels=[0],
+        left_labels=[Agent.VEHICLE, Agent.MOTORCYCLIST, Agent.BUS],
+        right_labels=[Agent.VEHICLE, Agent.MOTORCYCLIST, Agent.BUS],
         all_labels=[0,1,2,3,4,5,6,7,8,9]  # include all agent types in distance field
     )
 

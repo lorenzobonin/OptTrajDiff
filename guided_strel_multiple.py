@@ -73,15 +73,22 @@ class GenFromLatent(pl.LightningModule):
             elif self.property_name == "reach_uns":
                 robustness = sp.evaluate_eg_reach_mask(
                     full_world, mask_eval, eval_mask, self.node_types,
-                    left_label=[0,1,2,3,4], right_label=[0,1,2,3,4], threshold_1=0.7, threshold_2=1.0, d_max=5
+                    left_label=None, right_label=None, threshold_1=1.3, threshold_2=1.0, d_max=10
+                )
+            elif self.property_name == "pred_reach":
+                robustness = sp.evaluate_eg_reach(
+                    pred_eval_local, mask_eval, eval_mask, self.node_types,
+                    left_label=[0,1,2,3,4], right_label=[0,1,2,3,4], threshold_1=1.3, threshold_2=1.0, d_max=20
                 )
             elif self.property_name == "reach_simp":
                 robustness = sp.evaluate_simple_reach(
                     full_world, mask_eval, eval_mask, self.node_types,
-                    left_label=[], right_label=[], threshold_1=1.3, threshold_2=1.0, d_max=5
+                    left_label=[0,1,2,3,4], right_label=[0,1,2,3,4], threshold_1=1.3, threshold_2=1.0, d_max=20
                 )
+            elif self.property_name =="ped_pred":
+                robustness = sp.evaluate_ped_somewhere_unmask_debug(pred_eval_local, self.node_types,d_zone=30)
             elif self.property_name == "ped_unsafe":
-                robustness = sp.evaluate_ped_somewhere_unsafe(full_world, mask_eval, eval_mask, self.node_types, d_zone= 150)
+                robustness = sp.evaluate_ped_somewhere_unsafe(full_world, mask_eval, eval_mask, self.node_types, d_zone= 50)
             else:
                 raise ValueError(f"Unknown property type '{self.property_name}'")
 
@@ -93,7 +100,7 @@ class GenFromLatent(pl.LightningModule):
 # ============================================================
 
 if __name__ == '__main__':
-    seed_value = 2016
+    seed_value = 1998
     pl.seed_everything(seed_value, workers=True)
 
     parser = ArgumentParser()
@@ -132,10 +139,10 @@ if __name__ == '__main__':
     parser.add_argument('--cost_param_threl', type = float, default = 1.0)
     # === Optimization-specific arguments ===
     parser.add_argument('--property', type=str, default='reach_uns',
-                        choices=['reach_uns', 'head_real', 'ped_unsafe', 'reach_simp'])  
+                        choices=['reach_uns', 'head_real', 'ped_unsafe', 'reach_simp', 'pred_reach', 'ped_pred'])  
     parser.add_argument('--num_samples', type=int, default=5)
-    parser.add_argument('--lambda_reg', type=float, default=0.01)
-    parser.add_argument('--lr', type=float, default=0.005)
+    parser.add_argument('--lambda_reg', type=float, default=0.001)
+    parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--tol', type=float, default=1e-8)
     parser.add_argument('--max_steps', type=int, default=300)
     parser.add_argument('--split', type=str, default='val')
@@ -167,13 +174,13 @@ if __name__ == '__main__':
     )
 
     #Example list of scenarios
-    top_num_agents_scenarios = [
-         (25, 7520), (24, 11135), (23, 4611),
-         (20, 6323),
-        (19, 1359), (19, 6937)
-    ]
+    # top_num_agents_scenarios = [
+    #      (25, 7520), (24, 11135), (23, 4611),
+    #      (20, 6323),
+    #     (19, 1359), (19, 6937)
+    # ]
 
-    #top_num_agents_scenarios = [(19, 6937), (20, 6323), (19, 1359)]
+    top_num_agents_scenarios = [(19, 6937), (24, 11135), (25, 7520)]
 
     num_dim = 10
     save_dir = f"outputs_{args.property}"
@@ -224,7 +231,7 @@ if __name__ == '__main__':
         su.summarize_reshaped(loc_reshaped)
 
         tmax, tglob = su.estimate_heading_thresholds(full_world)
-        if args.property == 'head_real':
+        if args.property == 'head_real' or args.property == 'pred_reach' or args.property== 'ped_pred':
             node_types = pred_types
         else:
             node_types = full_types

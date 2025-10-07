@@ -73,7 +73,7 @@ def plot_trajectories(trajectories, filename="trajectories.png"):
 
 
 if __name__ == '__main__':
-    pl.seed_everything(45 , workers=True)
+    pl.seed_everything(54 , workers=True)
 
     parser = ArgumentParser()
     parser.add_argument('--root', type=str, required=True)
@@ -111,7 +111,7 @@ if __name__ == '__main__':
     parser.add_argument('--cost_param_threl', type = float, default = 1.0)
 
     parser.add_argument('--property', type=str, default='reach_uns',
-                        choices=['reach_uns', 'head_real', 'ped_unsafe', 'reach_simp', 'pred_reach'])
+                        choices=['reach_uns', 'head_real', 'ped_unsafe', 'reach_simp', 'pred_reach', 'ped_pred'])
     
     args = parser.parse_args()
 
@@ -137,9 +137,9 @@ if __name__ == '__main__':
     )
 
     scen_idx = 1359
-
     num_agents = 19
-
+    #scen_idx = 6323
+    #num_agents = 20
     num_dim = 10
 
     
@@ -167,7 +167,7 @@ if __name__ == '__main__':
     print("pred type shape:", pred_types.size())
 
     # Node categories (adapt if you have heterogeneous agents)
-    if args.property == 'head_real' or args.property == 'pred_reach':
+    if args.property == 'head_real' or args.property == 'pred_reach' or args.property== 'ped_pred':
         node_types = pred_types
     else:
         node_types = full_types
@@ -212,7 +212,7 @@ if __name__ == '__main__':
             elif self.property_name == "reach_uns":
                 robustness = sp.evaluate_eg_reach_mask(
                     full_world, mask_eval, eval_mask, self.node_types,
-                    left_label=[], right_label=[], threshold_1=1.3, threshold_2=1.0, d_max=10
+                    left_label=None, right_label=None, threshold_1=1.3, threshold_2=1.0, d_max=10
                 )
             elif self.property_name == "pred_reach":
                 robustness = sp.evaluate_eg_reach(
@@ -224,8 +224,10 @@ if __name__ == '__main__':
                     full_world, mask_eval, eval_mask, self.node_types,
                     left_label=[0,1,2,3,4], right_label=[0,1,2,3,4], threshold_1=1.3, threshold_2=1.0, d_max=20
                 )
+            elif self.property_name =="ped_pred":
+                robustness = sp.evaluate_ped_somewhere_unmask_debug(pred_eval_local, self.node_types,d_zone=30)
             elif self.property_name == "ped_unsafe":
-                robustness = sp.evaluate_ped_somewhere_unsafe(full_world, mask_eval, eval_mask, self.node_types, d_zone= 150)
+                robustness = sp.evaluate_ped_somewhere_unsafe_mask(full_world, mask_eval, eval_mask, self.node_types, d_zone= 30)
             else:
                 raise ValueError(f"Unknown property type '{self.property_name}'")
 
@@ -242,9 +244,9 @@ if __name__ == '__main__':
     g = torch.autograd.grad(robust, z_param, retain_graph=True, allow_unused=True)[0]
     print("‖grad‖:", 0.0 if g is None else g.detach().abs().max().item())
 
-    z_opt = su.grad_ascent_reg(qmodel = gen_model, z0 = x_T, lr=0.01, tol=1e-12, lambda_reg=-0.001, max_steps=700)
+    z_opt = su.grad_ascent_reg(qmodel = gen_model, z0 = x_T, lr=0.1, tol=1e-12, lambda_reg=0.0, max_steps=2)
 
-    z_reg = su.grad_ascent_reg(qmodel = gen_model, z0 = x_T, lr=0.01, tol=1e-12, lambda_reg=0.001, max_steps=700)
+    z_reg = su.grad_ascent_reg(qmodel = gen_model, z0 = x_T, lr=0.1, tol=1e-12, lambda_reg=0.001, max_steps=700)
 
     print("Initial latent point:", x_T)
     print("Optimal latent point:", z_opt)
@@ -266,7 +268,7 @@ if __name__ == '__main__':
     #model.latent_generator(x_T, i, plot=True, enable_grads=False, return_pred_only=False)
 
     
-    model.latent_generator(x_T, scen_idx, plot=True, enable_grads=False, return_pred_only=True, exp_id= f"{args.property}_init")
+    model.latent_generator(x_T, scen_idx, plot=True, enable_grads=False, return_pred_only=True, exp_id= f"{args.property}_rand")
 
     model.latent_generator(z_opt, scen_idx, plot=True, enable_grads=False, return_pred_only=True, exp_id= f"{args.property}_opt")
 

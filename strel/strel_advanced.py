@@ -723,28 +723,34 @@ class Reach(Node):
         s2 = torch.where(self.right_mask, s2, NEG_INF)  # forbid non-right-label destinations
 
         # edge capacities
-        s1_btnt = s1.permute(0, 2, 1).contiguous()        # [B,T,N]
+        s1_btnt = s1.permute(0, 2, 1).contiguous()
+        mask = torch.eye(N, device=device, dtype=torch.bool)    
         C = torch.where(
             self.adjacency_matrix.bool(),
             s1_btnt.unsqueeze(-1).expand(B, T, N, N),
             NEG_INF
-        )
-        C[:, :, idx, idx] = POS_INF  # allow zero-hop
+        )   
+        C = torch.where(mask.unsqueeze(0).unsqueeze(0), 
+                torch.tensor(POS_INF, device=device, dtype=dtype), 
+                C)
 
         # widest path (max-min) Floyd–Warshall
         W_cap = C
         for k in range(N):
-            w_ik = W_cap[:, :, :, k]
-            w_kj = W_cap[:, :, k, :]
+            w_ik = W_cap[:, :, :, k].clone()
+            w_kj = W_cap[:, :, k, :].clone()
             cand = torch.minimum(w_ik.unsqueeze(-1), w_kj.unsqueeze(-2))
             W_cap = torch.maximum(W_cap, cand)
 
         # distances (min-plus) Floyd–Warshall
         D = torch.where(self.adjacency_matrix.bool(), self.weight_matrix, POS_INF)
-        D[:, :, idx, idx] = 0.0
+        D = torch.where(mask.unsqueeze(0).unsqueeze(0),
+                torch.tensor(0.0, device=device, dtype=dtype),
+                D)
+    
         for k in range(N):
-            d_ik = D[:, :, :, k]
-            d_kj = D[:, :, k, :]
+            d_ik = D[:, :, :, k].clone()
+            d_kj = D[:, :, k, :].clone()
             cand = d_ik.unsqueeze(-1) + d_kj.unsqueeze(-2)
             D = torch.minimum(D, cand)
 
@@ -876,30 +882,36 @@ class Escape(Node):
 
         # 2) Edge capacities C (use SOURCE node capacity): [B,T,N,N]
         s_btnt = s.permute(0, 2, 1).contiguous()                     # [B, T, N]
+        mask = torch.eye(N, device=device, dtype=torch.bool)
         C = torch.where(
             self.adjacency_matrix.bool(),
             s_btnt.unsqueeze(-1).expand(B, T, N, N),
             NEG_INF
         )
+        C = torch.where(mask.unsqueeze(0).unsqueeze(0), 
+                        torch.tensor(POS_INF, device=device, dtype=dtype), 
+                        C)
         # Important: set diagonal to +inf so zero-hop capacity is unlimited,
         # and we will clamp by destination s(j) later (like Reach).
         C = C.clone()
-        C[:, :, idx, idx] = POS_INF
 
         # 3) Widest-path (max-min) via Floyd–Warshall on C
         W_cap = C
         for k in range(N):
-            w_ik = W_cap[:, :, :, k]                                   # [B,T,N]
-            w_kj = W_cap[:, :, k, :]                                   # [B,T,N]
+            w_ik = W_cap[:, :, :, k].clone()                                   # [B,T,N]
+            w_kj = W_cap[:, :, k, :].clone()                                   # [B,T,N]
             cand = torch.minimum(w_ik.unsqueeze(-1), w_kj.unsqueeze(-2)) # [B,T,N,N]
             W_cap = torch.maximum(W_cap, cand)
 
         # 4) All-pairs shortest path distances (min-plus) for the window
         D = torch.where(self.adjacency_matrix.bool(), self.weight_matrix, POS_INF)
-        D[:, :, idx, idx] = 0.0
+        D = torch.where(mask.unsqueeze(0).unsqueeze(0),
+                torch.tensor(0.0, device=device, dtype=dtype),
+                D)
+        
         for k in range(N):
-            d_ik = D[:, :, :, k]                                       # [B,T,N]
-            d_kj = D[:, :, k, :]                                       # [B,T,N]
+            d_ik = D[:, :, :, k].clone()                                       # [B,T,N]
+            d_kj = D[:, :, k, :].clone()                                       # [B,T,N]
             cand = d_ik.unsqueeze(-1) + d_kj.unsqueeze(-2)             # [B,T,N,N]
             D = torch.minimum(D, cand)
 

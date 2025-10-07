@@ -12,8 +12,10 @@ reach_uns/
 head_real/
 reach_unsafe/
 ped_clear/
+ped_pred/
 reach_simp/
 outputs_reach/
+outputs_ped_pred/
 outputs_reach_unsafe/
 outputs_reach_simp/
 outputs_head_real/
