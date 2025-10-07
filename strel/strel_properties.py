@@ -1,10 +1,11 @@
 import torch
-from strel.strel_advanced import Atom, Reach, Reach_vec, Escape_vec, Globally, Eventually, Somewhere, Surround, Not, And, Or
+from strel.strel_advanced import Atom, Reach,  Globally, Eventually, Somewhere, Surround, Not, And, Or
 from strel.strel_advanced import _compute_front_distance_matrix
 import time
 import math
 import strel.strel_utils as su
 import numpy as np
+from enum import Enum
 
 
 ######################################################
@@ -12,18 +13,26 @@ import numpy as np
 ######################################################
 
 
-# ID_TO_TYPE = {
-#             0: "VEHICLE",
-#             1: "PEDESTRIAN",
-#             2: "CYCLIST",
-#             3: "MOTORCYCLIST",
-#             4: "BUS",
-#             5: "STATIC",
-#             6: "BACKGROUND",
-#             7: "CONSTRUCTION",
-#             8: "RIDERLESS_BICYCLE",
-#             9: "UNKNOWN",
-#         }
+
+# class syntax
+class Agent(Enum):
+    VEHICLE = 0
+    PEDESTRIAN = 1
+    CYCLIST = 2
+    MOTORCYCLIST = 3
+    BUS = 4
+    STATIC = 5
+    BACKGROUND = 6
+    CONSTRUCTION = 7
+    RIDERLESS_BICYCLE = 8
+    UNKNOWN = 9
+
+
+# functional syntax
+Agent = Enum('Agent', [('VEHICLE', 0),('PEDESTRIAN', 1),('CYCLIST', 2),
+                       ('MOTORCYCLIST', 3),('BUS', 4),('STATIC', 5),('BACKGROUND', 6),
+                       ('CONSTRUCTION', 7),('RIDERLESS_BICYCLE', 8),('UNKNOWN', 9)])
+
 
 
 
@@ -127,54 +136,6 @@ def _d_safe_from_scene(traj, ped_labels=(3,), veh_labels=(0,4), p=0.05,
 ######################################################
 
 
-def evaluate_reach_property_mask(full_world,
-                                 mask_eval_scene,
-                                 eval_idx_scene,
-                                 left_label,
-                                 right_label,
-                                 threshold_1,
-                                 threshold_2):
-    """
-    full_world      : [N_total, T, 2]  (all agents of the scene)
-    mask_eval_scene : [N_eval_scene, T, 1]  (predicted slots for the scene's eval agents)
-    eval_idx_scene  : [N_eval_scene]  (row indices in full_world for those eval agents)
-    """
-    time_start = time.time()
-    device = full_world.device
-    N, T, _ = full_world.shape
-
-    # If you want dynamic/static labels, build them here from your categories.
-    # For now, mark everyone as 1 (adapt as needed).
-    node_types = torch.ones(N, device=device)
-
-    traj = su.reshape_trajectories(full_world, node_types)   # [1, N, 6, T]
-
-    # STREL atoms (example on |v|)
-    safevel_atom = Atom(var_index=4, threshold=threshold_1, lte=True)
-    true_atom    = Atom(var_index=4, threshold=threshold_2, lte=True)
-
-    reach = Reach_vec(
-        safevel_atom, true_atom,
-        d1=0.0, d2=1e6, is_unbounded=True,   # unbounded to avoid "no eligible dest" -inf traps
-        left_label=left_label,
-        right_label=right_label,
-        distance_function="Front"
-    )
-
-    reach_values = reach.quantitative(traj).squeeze(2)[0]   # [N, T]
-
-    # Build a full [N,T] boolean mask with predicted slots only for the scene's eval agents
-    full_mask = torch.zeros((N, T), dtype=torch.bool, device=device)
-    full_mask[eval_idx_scene] = mask_eval_scene.squeeze(-1).bool()     # [N_eval_scene,T] → rows in [N,T]
-
-    # Reduce only over predicted entries
-    vals = reach_values[full_mask]                                     # [num_predicted_entries]
-    alpha = 10.0
-    robustness = -(1.0/alpha) * torch.logsumexp(-alpha * vals.reshape(-1), dim=0)
-    time_end = time.time()
-    print(f"Reach evaluation time: {time_end - time_start:.4f}")
-    return robustness
-
 
 
 def evaluate_eg_reach_mask(
@@ -206,11 +167,11 @@ def evaluate_eg_reach_mask(
     traj = su.reshape_trajectories(full_world, node_types)   # [1, N, 6, T]
 
     # Atoms
-    fast_atom   = Atom(var_index=4, threshold=threshold_1, lte=False)  # vel > thr1
-    slow_atom   = Atom(var_index=4, threshold=threshold_2, lte=True)   # vel < thr2
+    fast_atom   = Atom(var_index=4, threshold=threshold_1, lte=False, labels=right_label)  # vel > thr1
+    slow_atom   = Atom(var_index=4, threshold=threshold_2, lte=True, labels=left_label)   # vel < thr2
 
     # Spatial reach with FRONT distance
-    reach = Reach_vec(
+    reach = Reach(
         left_child=fast_atom,
         right_child=slow_atom,
         d1=0.0, d2=d_max,
@@ -221,14 +182,15 @@ def evaluate_eg_reach_mask(
     )
 
     # Temporal nesting: Eventually(Globally(Reach))
-    glob = Globally(reach)
-    evgl = Eventually(glob)
+    #glob = Globally(reach)
+    evgl = Eventually(reach, right_time_bound=T-1) ###!!!! check if correct
 
     # Quantitative semantics
     vals = evgl.quantitative(traj, normalize=False)  # [B,N,1,T]
     vals = vals.squeeze(2)[0]                        # [N,T]
 
     # Masking: only predicted entries
+    # pass only one mask to optimize!!!
     full_mask = torch.zeros((N, T), dtype=torch.bool, device=device)
     full_mask[eval_idx_scene] = mask_eval_scene.squeeze(-1).bool()
 
@@ -241,13 +203,86 @@ def evaluate_eg_reach_mask(
     if selected.numel() == 0:
         robustness = torch.tensor(0.0, device=device)
     else:
-        alpha = 20.0
-        robustness = -(1.0/alpha) * torch.logsumexp(-alpha * selected.reshape(-1), dim=0)
-
-    time_end = time.time()
+        #!!! check su valore esatto della robustness
+         alpha = 20.0
+         robustness = (1.0/alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
+        #robustness = torch.max(selected)
+    #time_end = time.time()
     #print(f"Eventually-Globally-Reach eval time: {time_end - time_start:.4f}")
     return robustness
 
+
+def evaluate_simple_reach(
+        full_world,
+        mask_eval_scene,
+        eval_idx_scene,
+        node_types,
+        left_label,
+        right_label,
+        threshold_1,
+        threshold_2,
+        d_max=50.0):
+    """
+    Property: Eventually Globally ( node of left_label with vel > threshold_1
+                                    reaches (Front distance, <= d_max)
+                                    node of right_label with vel < threshold_2 )
+    So a vehicle with high speed eventually comes close in front of a slow vehicle.
+    If no such pair exists, robustness is +inf (safe).
+    If such pairs exist but never satisfy the property, robustness is -inf (unsafe).
+    If some pairs satisfy the property, robustness is smooth min over them.
+    Robustness is computed at t=0.
+    """
+    time_start = time.time()
+    device = full_world.device
+    N, T, _ = full_world.shape
+
+    # Node categories (adapt if you have heterogeneous agents)
+    node_types = node_types
+    traj = su.reshape_trajectories(full_world, node_types)   # [1, N, 6, T]
+
+    # Atoms
+    fast_atom   = Atom(var_index=4, threshold=threshold_1, lte=False, labels=right_label)  # vel > thr1
+    slow_atom   = Atom(var_index=4, threshold=threshold_2, lte=True, labels=left_label)   # vel < thr2
+
+    # Spatial reach with FRONT distance
+    reach = Reach(
+        left_child=fast_atom,
+        right_child=slow_atom,
+        d1=0.0, d2=d_max,
+        is_unbounded=False,
+        left_label=left_label,
+        right_label=right_label,
+        distance_function="Front"
+    )
+
+    # Temporal nesting: Eventually(Globally(Reach))
+    #glob = Globally(reach)
+    ###!!!! check if correct
+
+    # Quantitative semantics
+    vals = reach.quantitative(traj, normalize=False)  # [B,N,1,T]
+    vals = vals.squeeze(2)[0]                        # [N,T]
+
+    # Masking: only predicted entries
+    # pass only one mask to optimize!!!
+    full_mask = torch.zeros((N, T), dtype=torch.bool, device=device)
+    full_mask[eval_idx_scene] = mask_eval_scene.squeeze(-1).bool()
+
+    selected = vals[full_mask]
+
+    if selected.numel() == 0:
+        return torch.tensor(0.0, device=full_world.device)
+
+    if selected.numel() == 0:
+        robustness = torch.tensor(0.0, device=device)
+    else:
+        #!!! check su valore esatto della robustness
+         alpha = 20.0
+         robustness = (1.0/alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
+        #robustness = torch.max(selected)
+    #time_end = time.time()
+    #print(f"Eventually-Globally-Reach eval time: {time_end - time_start:.4f}")
+    return robustness
 
 
 
@@ -257,49 +292,26 @@ def evaluate_eg_reach_mask(
 ######################################################
 
 
-def evaluate_safe_follow(full_world, mask_eval, eval_mask, node_types, v_thr=5.0, d_safe=5.0):
-    traj = su.reshape_trajectories(full_world, node_types)  # [1,N,F,T]
-
-    fast_atom = Atom(var_index=4, threshold=v_thr, lte=False, labels=[0])  # fast vehicle
-    veh_atom  = Atom(var_index=4, threshold=100.0, lte=True, labels=[0])   # any vehicle
-
-    reach = Reach_vec(
-        left_child=fast_atom,
-        right_child=veh_atom,
-        d1=0.0, d2=d_safe,
-        distance_function="Front",
-        left_label=[0],
-        right_label=[0]
-    )
-
-    prop = Globally(Not(reach))  # always: fast → not close in front
-    vals = prop.quantitative(traj, normalize=False).squeeze(2)[0]
-
-    full_mask = torch.zeros_like(vals, dtype=torch.bool)
-    full_mask[eval_mask] = mask_eval.squeeze(-1).bool()
-    selected = vals[full_mask]
-
-    if selected.numel() == 0:
-        return torch.tensor(0.0, device=full_world.device)
-
-    alpha = 20.0
-    return -torch.logsumexp(-alpha * selected.reshape(-1), dim=0) / alpha
 
 
 
 def evaluate_cyclist_yield(full_world, mask_eval, eval_mask, node_types, d_max=10.0):
     traj = su.reshape_trajectories(full_world, node_types)
 
-    veh_atom = Atom(var_index=4, threshold=100.0, lte=True, labels=[0])
-    cyc_atom = Atom(var_index=4, threshold=100.0, lte=True, labels=[2])  # cyclists
+    veh_labels = [Agent.VEHICLE, Agent.BUS]
 
-    reach = Reach_vec(
+    cyc_labels = [Agent.CYCLIST]
+
+    veh_atom = Atom(var_index=4, threshold=0.0, lte=False, labels=veh_labels)  # moving vehicle
+    cyc_atom = Atom(var_index=4, threshold=0.0, lte=False, labels=cyc_labels)  # moving cyclists
+
+    reach = Reach(
         left_child=veh_atom,
         right_child=cyc_atom,
         d1=0.0, d2=d_max,
         distance_function="Front",
-        left_label=[0],
-        right_label=[2]
+        left_label=veh_labels,
+        right_label=cyc_labels
     )
 
     prop = Eventually(Not(reach))
@@ -316,23 +328,27 @@ def evaluate_cyclist_yield(full_world, mask_eval, eval_mask, node_types, d_max=1
     return -torch.logsumexp(-alpha * selected.reshape(-1), dim=0) / alpha
 
 
-def evaluate_ped_no_surround(full_world, mask_eval, eval_mask, node_types, d_sur=8.0):
+def evaluate_surround(full_world, mask_eval, eval_mask, node_types, d_sur=8.0):
     traj = su.reshape_trajectories(full_world, node_types)
 
-    ped_atom = Atom(var_index=4, threshold=100.0, lte=True, labels=[3])  # pedestrian
-    veh_atom = Atom(var_index=4, threshold=100.0, lte=True, labels=[0])  # vehicle
+    veh_labels = [Agent.VEHICLE, Agent.BUS, Agent.MOTORCYCLIST]
+
+    slow_labels =[Agent.VEHICLE, Agent.PEDESTRIAN, Agent.CYCLIST, Agent.MOTORCYCLIST]
+
+    slow_atom = Atom(var_index=4, threshold=1.0, lte=True, labels=slow_labels)  # moving pedestrian
+    veh_atom = Atom(var_index=4, threshold=0.01, lte=False, labels=veh_labels)  # moving vehicle !!!check for vel>sth
 
     surround = Surround(
-        left_child=ped_atom,
+        left_child=slow_atom,
         right_child=veh_atom,
         d2=d_sur,
         distance_function="Euclid",
-        left_labels=[3],
-        right_labels=[0],
-        all_labels=[0,1,2,3]  # all possible
+        left_labels=slow_labels,
+        right_labels=veh_labels,
+        all_labels=[Agent.VEHICLE, Agent.BUS, Agent.MOTORCYCLIST, Agent.PEDESTRIAN, Agent.CYCLIST ]  # all possible
     )
 
-    prop = Globally(Not(surround))
+    prop = Globally(surround)
     vals = prop.quantitative(traj, normalize=False).squeeze(2)[0]
 
     full_mask = torch.zeros_like(vals, dtype=torch.bool)
@@ -343,136 +359,75 @@ def evaluate_ped_no_surround(full_world, mask_eval, eval_mask, node_types, d_sur
         return torch.tensor(0.0, device=full_world.device)
 
     alpha = 20.0
-    return -torch.logsumexp(-alpha * selected.reshape(-1), dim=0) / alpha
+    return torch.logsumexp(alpha * selected.reshape(-1), dim=0) / alpha
 
 
-def evaluate_ped_somewhere_safe(full_world, mask_eval, eval_mask, node_types, d_zone=20.0):
+def evaluate_ped_somewhere_unsafe(full_world, mask_eval, eval_mask, node_types, d_zone=20.0):
     """
-    Property: pedestrians are safe if they are not within d_zone of any vehicle.
-    Robustness is positive if pedestrians are safe, or if there are no pedestrians at all.
+    Property: pedestrians are unsafe if they ever come within d_zone of a vehicle.
+
+    Robustness:
+      > 0 → pedestrians remain safe (no close encounter)
+      < 0 → at some point, a pedestrian is too close to a vehicle
+      = +1 → no pedestrians present (vacuously safe)
     """
+
+    device = full_world.device
     traj = su.reshape_trajectories(full_world, node_types)
 
-    # Define atoms (only the label dimension matters here)
-    ped_atom = Atom(var_index=4, threshold=100.0, lte=True, labels=[3])  # pedestrians
-    veh_atom = Atom(var_index=4, threshold=100.0, lte=True, labels=[0])  # vehicles
+    # Define relevant agent groups
+    ped_labels = [Agent.PEDESTRIAN]
+    veh_labels = [Agent.VEHICLE, Agent.CYCLIST, Agent.MOTORCYCLIST, Agent.BUS]
 
-    # Reach: pedestrian within d_zone of a vehicle
-    reach = Reach_vec(
+    ped_atom = Atom(var_index=4, threshold=0.0, lte=False, labels=ped_labels)
+    veh_atom = Atom(var_index=4, threshold=0.01, lte=False, labels=veh_labels)
+
+    # Pedestrian-vehicle closeness within Euclidean distance d_zone
+    reach = Reach(
         left_child=ped_atom,
         right_child=veh_atom,
         d1=0.0, d2=d_zone,
         distance_function="Euclid",
-        left_label=[3],
-        right_label=[0]
+        left_label=ped_labels,
+        right_label=veh_labels
     )
+    
 
-    # Somewhere, the pedestrian is NOT near a vehicle
-    somewhere_safe = Somewhere(
-        child=Not(reach),
-        d2=d_zone,
-        distance_function="Euclid",
-        labels=[3]
-    )
 
-    # Globally (pedestrians are somewhere safe at all times)
-    prop = Globally(somewhere_safe)
+    # Unsafe condition: eventually some pedestrian is near a vehicle
+    prop_unsafe = Eventually(reach, right_time_bound=full_world.shape[1] - 1)
+    
 
-    vals = prop.quantitative(traj, normalize=False).squeeze(2)[0]
+    # Safe property is the negation
+
+
+    # Quantitative evaluation
+    vals = prop_unsafe.quantitative(traj, normalize=False).squeeze(2)[0]
 
     # Align temporal dimensions if needed
-    T_vals = vals.shape[1]
-    T_mask = mask_eval.shape[1]
+    T_vals, T_mask = vals.shape[1], mask_eval.shape[1]
     if T_vals != T_mask:
         min_T = min(T_vals, T_mask)
-        vals = vals[:, :min_T]
-        mask_eval = mask_eval[:, :min_T, :]
+        vals, mask_eval = vals[:, :min_T], mask_eval[:, :min_T, :]
 
     # Select only evaluated agents/timesteps
     full_mask = torch.zeros_like(vals, dtype=torch.bool)
     full_mask[eval_mask] = mask_eval.squeeze(-1).bool()
     selected = vals[full_mask]
 
-    # --- Handle "no pedestrians" case ---
-    # If there are no agents with label=3, robustness = +1.0 (safe)
-    has_ped = (torch.tensor(node_types) == 3).any().item()
-    if not has_ped:
-        return torch.tensor(1.0, device=full_world.device)
-
-    # If pedestrians exist but no selected entries, return small positive baseline
-    if selected.numel() == 0:
-        return torch.tensor(0.5, device=full_world.device)
-
-    # Smooth aggregation (log-sum-exp mean)
+    # Smooth aggregation (soft maximum)
     alpha = 20.0
-    robustness = -torch.logsumexp(-alpha * selected.reshape(-1), dim=0) / alpha
+    robustness = (1.0 / alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
     return robustness
 
-def evaluate_ped_yield_crossing(full_world, mask_eval, eval_mask, node_types,
-                                d_safe=8.0, d_sur=12.0):
-    """
-    Property for Scenario 1359: Vehicles/buses must keep ≥ d_safe distance
-    from pedestrians while crossing. If no pedestrians, robustness = +1.
-
-    Positive = safe separation; Negative = near-collision or unsafe proximity.
-    """
-    traj = su.reshape_trajectories(full_world, node_types)
-    device = full_world.device
-
-    # Identify types
-    ped_labels = [3]
-    veh_labels = [0, 4]  # vehicles + buses
-
-    # If there are no pedestrians in this scene, return safe
-    types = traj[0, :, 5, :]
-    if not any([(types == l).any() for l in ped_labels]):
-        return torch.tensor(1.0, device=device)
-
-    ped_atom = Atom(var_index=4, threshold=100.0, lte=True, labels=ped_labels)
-    veh_atom = Atom(var_index=4, threshold=100.0, lte=True, labels=veh_labels)
-
-    # Use Euclidean distance (since speeds are near zero)
-    reach = Reach_vec(
-        left_child=ped_atom,
-        right_child=veh_atom,
-        d1=0.0,
-        d2=d_safe,
-        distance_function="Euclid",
-        left_label=ped_labels,
-        right_label=veh_labels
-    )
-
-    # Pedestrians must always not be "reaching" any vehicle (≥ d_safe)
-    prop = Globally(Not(reach))
-    vals = prop.quantitative(traj, normalize=False).squeeze(2)[0]
-
-    # Apply mask
-    T_vals = vals.shape[1]
-    T_mask = mask_eval.shape[1]
-    if T_vals != T_mask:
-        min_T = min(T_vals, T_mask)
-        vals = vals[:, :min_T]
-        mask_eval = mask_eval[:, :min_T, :]
-
-    mask = torch.zeros_like(vals, dtype=torch.bool)
-    mask[eval_mask] = mask_eval.squeeze(-1).bool()
-    selected = vals[mask]
-
-    if selected.numel() == 0:
-        return torch.tensor(0.0, device=device)
-
-    # Smooth min across agents/timesteps
-    alpha = 20.0
-    robustness = -(1.0 / alpha) * torch.logsumexp(-alpha * selected.reshape(-1), dim=0)
-    return robustness
 
 
 def evaluate_vehicle_spacing(full_world, mask_eval, eval_mask, node_types, d_safe=5.0):
     traj = su.reshape_trajectories(full_world, node_types)
     veh_atom1 = Atom(var_index=4, threshold=0.0, lte=False, labels=[0,4])  # any moving vehicle
     
-    veh_atom2 = Atom(var_index=4, threshold=10.0, lte=True, labels=[0,4])  # any vehicle
-    reach = Reach_vec(
+    veh_atom2 = Atom(var_index=4, threshold=2.0, lte=True, labels=[0,4])  # any vehicle
+    reach = Reach(
         left_child=veh_atom1, right_child=veh_atom2,
         d1=0.0, d2=d_safe, distance_function="Front",
         left_label=[0], right_label=[0]
@@ -492,119 +447,12 @@ def evaluate_vehicle_spacing(full_world, mask_eval, eval_mask, node_types, d_saf
     return -(1/alpha)*torch.logsumexp(-alpha*selected.reshape(-1), dim=0)
 
 
-def evaluate_pedestrian_clearance(
-    full_world,
-    mask_eval,
-    eval_mask,
-    node_types,
-    d_safe=5.0,
-    adaptive=False
-):
-    """
-    Property: pedestrians should not come within Euclidean distance <= d_safe
-    of any moving vehicle. If no pedestrians are present, robustness = +∞ (safe).
-    """
-
-    traj = su.reshape_trajectories(full_world, node_types)  # [1, N, F, T]
-    device = traj.device
-
-    # === Adaptive safety distance (optional) ===
-    if adaptive:
-        pos = traj[0, :, :2, traj.shape[-1] // 2]
-        dist = torch.cdist(pos, pos)
-        d_safe = dist.median().item() * 0.05  # adaptive scaling factor
-
-    # === Define atoms and reach relation ===
-    ped_atom = Atom(var_index=4, threshold=100.0, lte=True, labels=[1])  # pedestrians
-    veh_atom = Atom(var_index=4, threshold=100.0, lte=True, labels=[0])  # vehicles
-
-    reach = Reach_vec(
-        left_child=ped_atom,
-        right_child=veh_atom,
-        d1=0.0,
-        d2=d_safe,
-        distance_function="Euclid",
-        left_label=[1],
-        right_label=[0],
-    )
-
-    prop = Globally(Not(reach))  # "always: pedestrians not too close to vehicles"
-
-    # === Quantitative semantics ===
-    vals = prop.quantitative(traj, normalize=False).squeeze(2)[0]  # [N, T']
-    vals, mask_eval = su.align_temporal_dimensions(vals, mask_eval)  # 🔧 fix
-
-    # === Mask valid predicted agents ===
-    full_mask = torch.zeros_like(vals, dtype=torch.bool)
-    full_mask[eval_mask] = mask_eval.squeeze(-1).bool()
-    selected = vals[full_mask]
-
-    # === Handle missing pedestrians ===
-    if selected.numel() == 0:
-        has_ped = (torch.tensor(node_types) == 1).any()
-        if not has_ped:
-            return torch.tensor(float("inf"), device=device)  # trivially satisfied
-        return torch.tensor(0.0, device=device)
-
-    # === Smooth min aggregation ===
-    alpha = 20.0
-    robustness = -torch.logsumexp(-alpha * selected.reshape(-1), dim=0) / alpha
-    return robustness
-
 
 
 
 #####################################################
 # HEADING/STABILITY PROPERTIES
 #####################################################
-
-
-
-
-def evaluate_heading_stability(full_world, mask_eval, eval_mask, node_types, theta_max=0.2):
-    """
-    STREL property: G ( |Δθ| ≤ θ_max )
-    Meaning: heading should remain stable across time.
-    Robustness > 0  →  satisfies (no sharp heading change)
-    Robustness < 0  →  violates (abrupt rotation)
-    """
-    device = full_world.device
-    traj = su.reshape_trajectories(full_world, node_types)  # [1,N,F,T]
-    vx, vy = traj[0,:,2,:], traj[0,:,3,:]
-    heading = torch.atan2(vy, vx + 1e-8)
-
-    # Per-step heading change
-    dtheta = torch.diff(heading, dim=1)
-    dtheta = (dtheta + np.pi) % (2 * np.pi) - np.pi
-    dtheta = torch.cat([dtheta, torch.zeros_like(dtheta[:, :1])], dim=1).abs()
-
-    # Inject heading difference into traj (feature index 4)
-    traj2 = traj.clone()
-    traj2[0,:,4,:] = dtheta
-
-    atom = Atom(var_index=4, threshold=theta_max, lte=True, labels=[0])  # only vehicles
-    prop = Globally(atom)
-    vals = prop.quantitative(traj2, normalize=False).squeeze(2)[0]  # [N,T]
-
-    # Align time dimension with mask
-    T_vals = vals.shape[1]
-    T_mask = mask_eval.shape[1]
-    if T_vals != T_mask:
-        min_T = min(T_vals, T_mask)
-        vals = vals[:, :min_T]
-        mask_eval = mask_eval[:, :min_T, :]
-
-    full_mask = torch.zeros_like(vals, dtype=torch.bool)
-    full_mask[eval_mask] = mask_eval.squeeze(-1).bool()
-    selected = vals[full_mask]
-
-    if selected.numel() == 0:
-        return torch.tensor(0.0, device=device)
-
-    # Soft min = smooth version of min semantics (STREL-consistent)
-    alpha = 20.0
-    robustness = -(1.0 / alpha) * torch.logsumexp(-alpha * selected.reshape(-1), dim=0)
-    return robustness
 
 
 
@@ -687,7 +535,7 @@ def evaluate_safe_lane_keeping(full_world, mask_eval, eval_mask, node_types,
     vlat_atom    = Atom(var_index=5, threshold=v_lat_max, lte=True, labels=vehicle_like)
 
     # Front-distance reach: vehicles stay behind any dynamic actor
-    reach = Reach_vec(
+    reach = Reach(
         left_child=heading_atom,
         right_child=vlat_atom,
         d1=0.0, d2=d_front,
@@ -747,7 +595,7 @@ def evaluate_eg_reach_adaptive(full_world, mask_eval_scene, eval_idx_scene, node
 
     fast_atom = Atom(var_index=4, threshold=threshold_1, lte=False)
     slow_atom = Atom(var_index=4, threshold=threshold_2, lte=True)
-    reach = Reach_vec(fast_atom, slow_atom, d1=0.0, d2=d_max,
+    reach = Reach(fast_atom, slow_atom, d1=0.0, d2=d_max,
                       left_label=left_label, right_label=right_label,
                       distance_function="Front")
 
@@ -766,291 +614,146 @@ def evaluate_eg_reach_adaptive(full_world, mask_eval_scene, eval_idx_scene, node
     return -torch.logsumexp(-alpha * selected.reshape(-1), dim=0) / alpha
 
 
-def evaluate_safe_follow_adaptive(full_world, mask_eval, eval_mask, node_types):
-    """
-    Adaptive Safe Following Property
-    A fast vehicle should always keep a safe distance from any vehicle in front.
-    """
-
-    traj = su.reshape_trajectories(full_world, node_types)
-    stats = get_scene_stats(traj)
-
-    v_thr = stats["mean_v"] + 0.5 * stats["std_v"]
-    d_safe = 0.3 * stats["mean_d"]
-
-    fast_atom = Atom(var_index=4, threshold=v_thr, lte=False, labels=[0])
-    veh_atom  = Atom(var_index=4, threshold=100.0, lte=True, labels=[0])
-    reach = Reach_vec(fast_atom, veh_atom, d1=0.0, d2=d_safe,
-                      distance_function="Front", left_label=[0], right_label=[0])
-
-    prop = Globally(Not(reach))
-    vals = prop.quantitative(traj, normalize=False).squeeze(2)[0]
-    full_mask = torch.zeros_like(vals, dtype=torch.bool)
-    full_mask[eval_mask] = mask_eval.squeeze(-1).bool()
-    selected = vals[full_mask]
-    if selected.numel() == 0:
-        return torch.tensor(0.0, device=full_world.device)
-    alpha = 20.0
-    return -torch.logsumexp(-alpha * selected.reshape(-1), dim=0) / alpha
-
-
-def evaluate_cyclist_yield_adaptive(full_world, mask_eval, eval_mask, node_types):
-    """
-    Adaptive Cyclist Yielding Property
-    A fast vehicle should eventually come close in front of a slow cyclist.
-    """
-    traj = su.reshape_trajectories(full_world, node_types)
-    stats = get_scene_stats(traj)
-
-    d_max = 0.4 * stats["mean_d"]
-
-    veh_atom = Atom(var_index=4, threshold=100.0, lte=True, labels=[0])
-    cyc_atom = Atom(var_index=4, threshold=100.0, lte=True, labels=[2])
-    reach = Reach_vec(veh_atom, cyc_atom, d1=0.0, d2=d_max,
-                      distance_function="Front", left_label=[0], right_label=[2])
-    prop = Eventually(Not(reach))
-    vals = prop.quantitative(traj, normalize=False).squeeze(2)[0]
-    full_mask = torch.zeros_like(vals, dtype=torch.bool)
-    full_mask[eval_mask] = mask_eval.squeeze(-1).bool()
-    selected = vals[full_mask]
-    if selected.numel() == 0:
-        return torch.tensor(0.0, device=full_world.device)
-    alpha = 20.0
-    return -torch.logsumexp(-alpha * selected.reshape(-1), dim=0) / alpha
-
-
-
-def evaluate_safe_lane_keeping_adapt(
+def evaluate_heading_stability_real(
     full_world,
-    mask_eval,
-    eval_mask,
     node_types,
-    mode="adaptive",
-    theta_max=None,
-    v_lat_max=None,
-    d_front=None,
-    print_thresholds=True,
+    theta_max_local=0.2,
+    theta_max_global=3.0,
 ):
     """
-    Adaptive Safe Lane-Keeping Property (Multi-Agent Aware)
+    STREL property enforcing both local and cumulative heading stability.
 
-    For all vehicle-like agents (VEHICLE, BUS):
-      - Maintain stable heading (|Δθ| ≤ theta_max)
-      - Maintain low lateral velocity (|v_lat| ≤ v_lat_max)
-      - If a dynamic agent is ahead within distance d_front, stay behind it.
+    Property:
+        G ( |Δθ_t| ≤ θ_local  ∧  Σ_t |Δθ_t| ≤ θ_global )
 
-    If mode='adaptive', all thresholds are derived per scenario
-    based on observed speed variance and inter-agent distances.
+    Meaning:
+      - No abrupt per-timestep turns (local stability)
+      - No excessive total rotation (global stability)
+
+    Positive robustness → stable heading
+    Negative robustness → unstable / erratic heading
     """
-
     device = full_world.device
-    traj = su.reshape_trajectories(full_world, node_types)
-    _, N, F, T = traj.shape
+    traj = su.reshape_trajectories(full_world, node_types)  # [1,N,F,T]
+    _, N, _, T = traj.shape
 
-    # ------------------------------------------------------------
-    # === ADAPTIVE THRESHOLDING ===
-    # ------------------------------------------------------------
-    if mode == "adaptive":
-        vx, vy = traj[0, :, 2, :], traj[0, :, 3, :]
-        v_abs = torch.sqrt(vx**2 + vy**2)
-        speed_std = v_abs.std().item()
-        speed_mean = v_abs.mean().item()
-
-        # heading/lateral thresholds proportional to dynamics
-        theta_max = float(np.clip(0.5 * speed_std, 0.1, 0.4))
-        v_lat_max = float(np.clip(2.0 * speed_std, 0.5, 3.0))
-
-        # derive scene scale (typical inter-agent distance)
-        t_mid = T // 2
-        coords = traj[0, :, 0:2, t_mid]
-        diff = coords.unsqueeze(1) - coords.unsqueeze(0)
-        dist = diff.norm(dim=-1)
-        triu = dist[torch.triu(torch.ones_like(dist), diagonal=1).bool()]
-        mean_dist = triu.mean().item()
-
-        # safe following distance: between 10–20% of mean spacing
-        d_front = float(np.clip(0.15 * mean_dist, 5.0, 40.0))
-
-        if print_thresholds:
-            print(f"[Adaptive thresholds] "
-                  f"θ_max={theta_max:.3f}, v_lat_max={v_lat_max:.3f}, d_front={d_front:.1f}")
-
-    else:
-        assert theta_max is not None and v_lat_max is not None and d_front is not None, \
-            "Manual mode requires explicit thresholds"
-
-    # ------------------------------------------------------------
-    # === Feature Extraction ===
-    # ------------------------------------------------------------
+    # === 1. Compute heading and per-step heading changes ===
     vx, vy = traj[0, :, 2, :], traj[0, :, 3, :]
-    heading = torch.atan2(vy, vx + 1e-6)
-    dtheta = torch.zeros_like(heading)
-    dtheta[:, 1:] = (heading[:, 1:] - heading[:, :-1]).abs()
+    heading = torch.atan2(vy, vx + 1e-8)  # [N,T]
 
-    # Lateral velocity magnitude
-    ortho_x, ortho_y = -torch.sin(heading), torch.cos(heading)
-    v_lat = (vx * ortho_x + vy * ortho_y).abs()
+    # Wrapped angular difference
+    dtheta = torch.diff(heading, dim=1)
+    dtheta = (dtheta + np.pi) % (2 * np.pi) - np.pi
+    dtheta_abs = torch.cat([dtheta, torch.zeros_like(dtheta[:, :1])], dim=1).abs()  # [N,T]
 
-    # Construct augmented trajectory tensor
-    traj2 = traj.clone()
-    traj2[0, :, 4, :] = dtheta.clamp(max=10.0)
-    traj2[0, :, 5, :] = v_lat.clamp(max=10.0)
+    # === 2. Compute cumulative heading change per agent ===
+    dtheta_sum_signal = dtheta_abs.sum(dim=1, keepdim=True)
+    dtheta_sum_signal = dtheta_sum_signal.expand(-1, T)
 
-    # ------------------------------------------------------------
-    # === Property Definition ===
-    # ------------------------------------------------------------
-    vehicle_like = [0, 4]           # VEHICLE + BUS
-    dynamic_others = [0, 2, 3, 4]   # VEHICLE, CYCLIST, MOTORCYCLIST, BUS
+    # === 3. Build independent "signal tensor" for STREL ===
+    # Each feature corresponds to one atomic variable
+    # var_index = 0 → |Δθ|
+    # var_index = 1 → Σ|Δθ|
+    # var_index = 2 → type
+    traj_sig = torch.zeros((1, N, 3, T), device=device)
+    traj_sig[0, :, 0, :] = dtheta_abs
+    traj_sig[0, :, 1, :] = dtheta_sum_signal
+    traj_sig[0, :, 2, :] = traj[0, :, 5, :]  # reuse the node type info
+    #print('mean heading abs', dtheta_abs.mean())
+    #print('max dtheta abs', dtheta_abs.max())
+    # === 4. Define atomic predicates ===
+    local_atom  = Atom(var_index=0, threshold=theta_max_local,  lte=True, labels=[])  # per-step smoothness
+    global_atom = Atom(var_index=1, threshold=theta_max_global, lte=True, labels=[])  # total smoothness
 
-    heading_atom = Atom(var_index=4, threshold=theta_max, lte=True, labels=vehicle_like)
-    vlat_atom    = Atom(var_index=5, threshold=v_lat_max, lte=True, labels=vehicle_like)
+    # === 5. Conjunction and temporal scope ===
+    
+    prop = Globally(local_atom, right_time_bound=T-1)  # evaluate along all timesteps
 
-    reach = Reach_vec(
-        left_child=heading_atom,
-        right_child=vlat_atom,
-        d1=0.0, d2=d_front,
-        left_label=vehicle_like,
-        right_label=dynamic_others,
-        distance_function="Front"
-    )
+    # === 6. Quantitative semantics ===
+    vals = prop.quantitative(traj_sig, normalize=False).squeeze(2)[0]  # [N,T]
 
-    conj = And(And(heading_atom, vlat_atom), reach)
-    prop = Globally(conj)
+    #print('maximum vals', vals.max())
 
-    # ------------------------------------------------------------
-    # === Evaluate Quantitative Robustness ===
-    # ------------------------------------------------------------
-    vals = prop.quantitative(traj2, normalize=False).squeeze(2)[0]
+    #print('minimum vals', vals.min())
 
-    # Align mask dimensions
-    T_vals, T_mask = vals.shape[1], mask_eval.shape[1]
-    if T_vals != T_mask:
-        min_T = min(T_vals, T_mask)
-        vals = vals[:, :min_T]
-        mask_eval = mask_eval[:, :min_T, :]
-
-    mask = torch.zeros_like(vals, dtype=torch.bool)
-    mask[eval_mask] = mask_eval.squeeze(-1).bool()
-    selected = vals[mask]
+    
+    selected = vals
 
     if selected.numel() == 0:
         return torch.tensor(0.0, device=device)
 
-    # Smooth min over agents/time
-    alpha = 20.0
+    # === 8. Smooth min aggregation (STREL semantics) ===
+    alpha = 20.0  
     robustness = -(1.0 / alpha) * torch.logsumexp(-alpha * selected.reshape(-1), dim=0)
-
     return robustness
 
-
-def evaluate_ped_front_yield_adaptive(full_world, mask_eval, eval_mask, node_types):
+def evaluate_heading_stability_full(
+    full_world,
+    node_types,
+    theta_max_local=0.2,
+    theta_max_global=3.0,
+):
     """
-    Positive robustness  => spec satisfied (fast vehicles keep front distance from peds,
-                         or they are slow).
-    Negative robustness  => there exist times/vehicles that are fast AND too close to a ped in front.
+    STREL property enforcing both local and cumulative heading stability.
 
-    Designed to have non-saturated margins and be both satisfiable and violable in typical scenes.
+    Property:
+        G ( |Δθ_t| ≤ θ_local  ∧  Σ_t |Δθ_t| ≤ θ_global )
+
+    Meaning:
+      - No abrupt per-timestep turns (local stability)
+      - No excessive total rotation (global stability)
+
+    Positive robustness → stable heading
+    Negative robustness → unstable / erratic heading
     """
     device = full_world.device
-    traj = su.reshape_trajectories(full_world, node_types)  # [1,N,6,T]
+    traj = su.reshape_trajectories(full_world, node_types)  # [1,N,F,T]
+    _, N, _, T = traj.shape
 
-    VEH, BUS, PED = 0, 4, 3
-    veh_like = [VEH, BUS]
-    ped_lab  = [PED]
-
-    types = traj[0, :, 5, :]  # [N,T]
-    if not ((types == PED).any() and ((types == VEH) | (types == BUS)).any()):
-        # No ped or no veh/bus -> trivially safe but keep small margin so it's not a hard constant
-        return torch.tensor(0.5, device=device)
-
-    # --------- 1) adaptive thresholds from THIS scene ----------
-    # 95th perc of veh speed as "fast" threshold (capped to a sane range)
-    vabs = traj[0, :, 4, :]  # |v| [N,T]
-    veh_mask = torch.isin(types, torch.tensor(veh_like, device=types.device))
-    v_veh = vabs[veh_mask]
-    if v_veh.numel() == 0:
-        v_fast = 0.6
-    else:
-        v_fast = float(torch.clamp(torch.quantile(v_veh.float(), 0.95), 0.4, 1.5))
-
-    # Safe distance from lower tail of veh-front-ped distances (4..10 m)
-    # Use your directional "Front" metric so only pedestrians in front count.
-    D_front = _compute_front_distance_matrix(traj)  # [B(=1), T, N, N]
-    B, T, N, _ = D_front.shape
-    # build masks [B,T,N]
-    tveh = traj[0, :, 5, :].permute(1, 0)  # [T,N]
-    veh_idx = torch.isin(tveh, torch.tensor(veh_like, device=device))
-    ped_idx = (tveh == PED)
-
-    d_samples = []
-    for t in range(T):
-        vi = veh_idx[t]  # [N]
-        pi = ped_idx[t]  # [N]
-        if vi.any() and pi.any():
-            dmat = D_front[0, t]                     # [N,N]
-            d = dmat[vi][:, pi].reshape(-1)          # veh->ped
-            d = d[torch.isfinite(d)]
-            if d.numel() > 0:
-                d_samples.append(d)
-    if len(d_samples) == 0:
-        d_safe = 6.0
-    else:
-        all_d = torch.cat(d_samples).float()
-        d_safe = float(torch.clamp(torch.quantile(all_d, 0.10), 4.0, 10.0))  # 10th perc
-
-    # --------- 2) fast vehicle atom & min front distance to a ped ----------
+    # === 1. Compute heading and per-step heading changes ===
     vx, vy = traj[0, :, 2, :], traj[0, :, 3, :]
-    vabs = (vx**2 + vy**2 + 1e-9).sqrt()
+    heading = torch.atan2(vy, vx + 1e-8)  # [N,T]
 
-    # fast if |v| >= v_fast  (only for veh-like)
-    fast_atom = Atom(var_index=4, threshold=v_fast, lte=False, labels=veh_like)
+    # Wrapped angular difference
+    dtheta = torch.diff(heading, dim=1)
+    dtheta = (dtheta + np.pi) % (2 * np.pi) - np.pi
+    dtheta_abs = torch.cat([dtheta, torch.zeros_like(dtheta[:, :1])], dim=1).abs()  # [N,T]
 
-    # Compute per-vehicle MIN front distance to ANY pedestrian at each t  -> [N,T]
-    # Start with +inf, then fill real distances on veh rows & ped cols.
-    min_front = torch.full((N, T), float('inf'), device=device)
-    for t in range(T):
-        vi = veh_idx[t]
-        pi = ped_idx[t]
-        if vi.any() and pi.any():
-            dmat = D_front[0, t]             # [N,N]
-            dsub = dmat[vi][:, pi]           # veh->ped
-            dsub = dsub.min(dim=1).values    # per veh min
-            min_front[vi, t] = dsub
+    # === 2. Compute cumulative heading change per agent ===
+    dtheta_sum_signal = dtheta_abs.sum(dim=1, keepdim=True)
+    dtheta_sum_signal = dtheta_sum_signal.expand(-1, T)
 
-    # Put this custom signal into an auxiliary channel (index 4) for a new Atom.
-    traj2 = traj.clone()
-    # Cap very large distances to keep gradients usable near boundary; this is *internal*
-    # (does not clamp the final robustness) and avoids total flatness when no ped is near.
-    cap = d_safe + 15.0
-    aux = torch.clamp(min_front, max=cap)
-    traj2[0, :, 4, :] = aux
+    # === 3. Build independent "signal tensor" for STREL ===
+    # Each feature corresponds to one atomic variable
+    # var_index = 0 → |Δθ|
+    # var_index = 1 → Σ|Δθ|
+    # var_index = 2 → type
+    traj_sig = torch.zeros((1, N, 3, T), device=device)
+    traj_sig[0, :, 0, :] = dtheta_abs.clamp(max=10.0)
+    traj_sig[0, :, 1, :] = dtheta_sum_signal.clamp(max=50.0)
+    traj_sig[0, :, 2, :] = traj[0, :, 5, :]  # reuse the node type info
 
-    # far_atom: distance >= d_safe (only for veh-like)
-    far_atom = Atom(var_index=4, threshold=d_safe, lte=False, labels=veh_like)
+    # === 4. Define atomic predicates ===
+    local_atom  = Atom(var_index=0, threshold=theta_max_local,  lte=True, labels=[0])  # per-step smoothness
+    global_atom = Atom(var_index=1, threshold=theta_max_global, lte=True, labels=[0])  # total smoothness
 
-    # --------- 3) implication: fast ⇒ far_from_ped_front ----------
-    #   φ := Globally( fast -> far )
-    spec = Globally(Implies(fast_atom, far_atom))
+    # === 5. Conjunction and temporal scope ===
+    conj = And(local_atom, global_atom)
+    prop = Globally(conj, right_time_bound=T-1)  # evaluate along all timesteps
 
-    vals = spec.quantitative(traj2, normalize=False).squeeze(2)[0]  # [N,T]
+    # === 6. Quantitative semantics ===
+    vals = prop.quantitative(traj_sig, normalize=False).squeeze(2)[0]  # [N,T]
 
-    # --------- 4) mask & smooth aggregate ----------
-    T_vals, T_mask = vals.shape[1], mask_eval.shape[1]
-    if T_vals != T_mask:
-        mT = min(T_vals, T_mask)
-        vals = vals[:, :mT]
-        mask_eval = mask_eval[:, :mT, :]
+    
+    selected = vals
 
-    mask = torch.zeros_like(vals, dtype=torch.bool)
-    mask[eval_mask] = mask_eval.squeeze(-1).bool()
-    picked = vals[mask]
-
-    if picked.numel() == 0:
+    if selected.numel() == 0:
         return torch.tensor(0.0, device=device)
 
-    # Softer aggregation than a hard soft-min: blend mean and soft-min for gradient richness
-    alpha = 4.0
-    softmin = -(1.0/alpha) * torch.logsumexp(-alpha * picked.reshape(-1), dim=0)
-    meanrb  = picked.mean()
-    robustness = 0.5 * softmin + 0.5 * meanrb
+    # === 8. Smooth min aggregation (STREL semantics) ===
+    alpha = 20.0  
+    robustness = -(1.0 / alpha) * torch.logsumexp(-alpha * selected.reshape(-1), dim=0)
     return robustness
+
+
+#aggiungi proprietà di accelerazione surrounded da decelerazione

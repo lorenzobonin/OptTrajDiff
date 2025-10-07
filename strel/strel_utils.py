@@ -1,9 +1,10 @@
 
 import torch
-from strel.strel_advanced import Atom, Reach, Reach_vec, Reach_vec, Escape_vec, Globally, Eventually
+from strel.strel_advanced import Atom, Reach, Globally, Eventually
 import time
 import math
 from torch_geometric.data import Data, Batch
+import numpy as np
 from av2.datasets.motion_forecasting.data_schema import (
     ArgoverseScenario,
     ObjectType,
@@ -24,6 +25,7 @@ def reshape_trajectories(pred: torch.Tensor, node_types: torch.Tensor) -> torch.
 
     # Velocities [S,N,2,T]
     velocities = positions[:,:, :,1:] - positions[:,:,:,:-1]
+    velocities = velocities*10.0  # from 0.1s timestep to m/s
     velocities = torch.cat([velocities, velocities[:,:,:,-1:]], dim=-1)
 
     # |v| [S,N,1,T]
@@ -51,119 +53,6 @@ def align_temporal_dimensions(vals, mask_eval):
         vals = vals[:, :min_T]
         mask_eval = mask_eval[:, :min_T, :]
     return vals, mask_eval
-
-
-
-
-
-def evaluate_reach_property(full_world: torch.Tensor, left_label: int, right_label: int, threshold_1 : float, threshold_2: float) -> torch.Tensor:
-    """
-    Evaluate a toy reach property on the full_world trajectory.
-
-    full_world: [N,T,2] tensor of positions
-    left_label: int, type label for left child (e.g. 1 for dynamic agents)
-    right_label: int, type label for right child (e.g. 0 for static agents)
-
-    Returns:
-        robustness: scalar differentiable robustness value
-    """
-    time_start = time.time()
-    device = full_world.device
-    N, T, _ = full_world.shape
-
-    # Node types: all dynamic=1 except last agent=0 (example)
-    node_types = torch.ones(N, device=device)
-    
-
-    # Reshape into [1,N,6,T]
-    trajectory = reshape_trajectories(full_world, node_types)
-
-    # Print average |v|
-    avg_abs_vel = trajectory[:,:,4,:].mean().item()
-    #print(f"Average absolute velocity: {avg_abs_vel:.4f}")
-
-    # Define STREL atoms
-    abs_vel_dim = 4  # [x,y,vx,vy,|v|,type]
-    safevel_atom = Atom(var_index=abs_vel_dim, threshold=threshold_1, lte=True)
-    true_atom = Atom(var_index=abs_vel_dim, threshold=threshold_2, lte=True)
-
-    # Reach property
-    reach = Reach_vec(
-        safevel_atom, true_atom,
-        d1=0, d2=1e2,
-        left_label=[left_label],
-        right_label=[right_label],
-        distance_function='Euclid',
-        distance_domain_min=0, distance_domain_max=1000
-    )
-
-    # Quantitative semantics -> [B,N,1,T]
-    reach_values = reach.quantitative(trajectory)
-
-    # Take min across batch, agents, time
-    alpha = 20.0
-    robustness = -(1/alpha) * torch.logsumexp(-alpha * reach_values.reshape(-1), dim=0)
-    time_end = time.time()
-    #print(f"Reach evaluation time: {time_end - time_start:.4f}")
-    return robustness
-
-
-
-def evaluate_escape_property(
-    full_world: torch.Tensor,
-    label: int,
-    threshold_1: float,
-    threshold_2: float,
-) -> torch.Tensor:
-    """
-    Evaluate a toy escape property on the full_world trajectory.
-
-    full_world: [N,T,2] tensor of positions
-    label: int, type label for agents that must attempt escape
-    threshold_1, threshold_2: thresholds for the atomic predicates (example)
-
-    Returns:
-        robustness: scalar differentiable robustness value
-    """
-    time_start = time.time()
-    device = full_world.device
-    N, T, _ = full_world.shape
-
-    # Node types: all labeled as 'label' except e.g. one background agent
-    node_types = torch.ones(N, device=device, dtype=torch.long) * label
-    node_types[-1] = 0  # example: mark last agent as background/other
-
-    # Reshape into [1,N,6,T]
-    trajectory = reshape_trajectories(full_world, node_types)
-
-    # Print avg velocity magnitude (for debug, like in reach test)
-    avg_abs_vel = trajectory[:, :, 4, :].mean().item()
-    print(f"[Escape test] Average |v| = {avg_abs_vel:.4f}")
-
-    # Define STREL atoms
-    abs_vel_dim = 4  # [x,y,vx,vy,|v|,type]
-    slow_atom = Atom(var_index=abs_vel_dim, threshold=threshold_1, lte=True)   # condition inside region
-
-    # Escape property: there exists a path (within d1,d2) to get out of current region
-    escape = Escape_vec(
-        child=slow_atom,
-        d1=0, d2=1e2,
-        labels=[label],  # only these nodes are allowed to propagate escape
-        distance_function='Euclid',
-        distance_domain_min=0, distance_domain_max=1000
-    )
-
-    # Quantitative semantics -> [B,N,1,T]
-    escape_values = escape.quantitative(trajectory)
-
-    # Robust aggregation: soft-min across all nodes/times
-    alpha = 20.0
-    robustness = -(1/alpha) * torch.logsumexp(-alpha * escape_values.reshape(-1), dim=0)
-
-    time_end = time.time()
-    print(f"Escape evaluation time: {time_end - time_start:.4f}")
-    return robustness
-
 
 
 
@@ -424,6 +313,92 @@ def summarize_reshaped(traj: torch.Tensor, name: str = "traj"):
     triu = dist[torch.triu(torch.ones_like(dist), diagonal=1).bool()]
     print(f"Distances @t={t_mid}: mean={triu.mean():.3f}, "
           f"min={triu.min():.3f}, max={triu.max():.3f}")
+
+
+def estimate_heading_thresholds(predicted_traj):
+    """
+    Estimate local and global heading-change thresholds adaptively
+    from the predicted trajectories.
+    
+    Works for both shapes:
+      - [1, N, F, T]  (batched trajectory tensor)
+      - [N, F, T]     (single-scene trajectory tensor)
+    """
+    # Handle possible batch dimension
+    if predicted_traj.dim() == 4:
+        _, N, F, T = predicted_traj.shape
+        vx, vy = predicted_traj[0, :, 2, :], predicted_traj[0, :, 3, :]
+    elif predicted_traj.dim() == 3:
+        N, F, T = predicted_traj.shape
+        vx, vy = predicted_traj[:, 2, :], predicted_traj[:, 3, :]
+    else:
+        raise ValueError(f"Unexpected trajectory shape {predicted_traj.shape}, expected [1,N,F,T] or [N,F,T].")
+
+    # === Compute heading changes ===
+    heading = torch.atan2(vy, vx + 1e-8)
+    dtheta = torch.diff(heading, dim=1)
+    dtheta = (dtheta + np.pi) % (2 * np.pi) - np.pi
+    dtheta_abs = dtheta.abs()
+
+    print('dtheta mean', dtheta_abs.mean())
+    print('dtheta std', dtheta_abs.std())
+    # === Adaptive thresholds ===
+    theta_max_local  = torch.quantile(dtheta_abs.flatten(), 0.75).item() 
+    theta_max_global = torch.quantile(dtheta_abs.sum(dim=1), 0.75).item() 
+
+    print(f"[adaptive thresholds] θ_local={theta_max_local:.3f}, θ_global={theta_max_global:.3f}")
+    return theta_max_local, theta_max_global
+
+
+def average_intertype_distance(full_world: torch.Tensor, node_types: torch.Tensor,
+                               type_a: int, type_b: int) -> float:
+    """
+    Compute the average Euclidean distance between all pairs of agents
+    of type `type_a` and type `type_b` over all timesteps.
+
+    Args:
+        full_world : torch.Tensor [N, T, F]
+            Trajectory tensor (positions + velocities, etc.).
+            Must have x,y as first two features (in meters).
+        node_types : torch.Tensor [N]
+            Integer type ID for each agent.
+        type_a : int
+            Label for the first group of agents (e.g. pedestrian = 3).
+        type_b : int
+            Label for the second group of agents (e.g. vehicle = 0).
+
+    Returns:
+        avg_dist : float
+            Mean distance (in meters) between all (a,b) pairs across all timesteps.
+            Returns `float('nan')` if one of the types is absent.
+    """
+    device = full_world.device
+    N, T, F = full_world.shape
+
+    # Extract positions only (x,y)
+    pos = full_world[:, :, :2]  # [N,T,2]
+
+    # Mask agents of each type
+    idx_a = (node_types == type_a).nonzero(as_tuple=False).squeeze(-1)
+    idx_b = (node_types == type_b).nonzero(as_tuple=False).squeeze(-1)
+
+    # Handle missing types
+    if idx_a.numel() == 0 or idx_b.numel() == 0:
+        return float("nan")
+
+    # Extract positions of each group
+    pos_a = pos[idx_a]  # [Na,T,2]
+    pos_b = pos[idx_b]  # [Nb,T,2]
+
+    # Compute pairwise distances for each timestep
+    # → broadcasted [T, Na, Nb, 2]
+    rel = pos_a.permute(1,0,2).unsqueeze(2) - pos_b.permute(1,0,2).unsqueeze(1)
+    dists = torch.norm(rel, dim=-1)  # [T,Na,Nb]
+
+    # Mean over all pairs and timesteps
+    avg_dist = dists.mean().item()
+    return avg_dist
+
 
 
 

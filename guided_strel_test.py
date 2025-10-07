@@ -13,8 +13,28 @@ import matplotlib.pyplot as plt
 
 import strel.strel_utils as su
 import strel.strel_properties as sp
-
+from enum import Enum
 import copy
+import time
+
+
+class Agent(Enum):
+    VEHICLE = 0
+    PEDESTRIAN = 1
+    CYCLIST = 2
+    MOTORCYCLIST = 3
+    BUS = 4
+    STATIC = 5
+    BACKGROUND = 6
+    CONSTRUCTION = 7
+    RIDERLESS_BICYCLE = 8
+    UNKNOWN = 9
+
+
+# functional syntax
+Agent = Enum('Agent', [('VEHICLE', 0),('PEDESTRIAN', 1),('CYCLIST', 2),
+                       ('MOTORCYCLIST', 3),('BUS', 4),('STATIC', 5),('BACKGROUND', 6),
+                       ('CONSTRUCTION', 7),('RIDERLESS_BICYCLE', 8),('UNKNOWN', 9)])
 
 
 
@@ -51,44 +71,9 @@ def plot_trajectories(trajectories, filename="trajectories.png"):
     plt.savefig(filename, dpi=300, bbox_inches="tight")
     plt.close()
 
-class GenFromLatent(pl.LightningModule):
-    def __init__(self, model, scen_id, node_types):
-        super().__init__()
-        self.model = model
-        self.scen_id = scen_id
-        self.node_types = node_types
-
-        #insert STREL here if needed
-
-    
-
-    def forward(self, x_T):
-        # Ask for fused world + differentiable pieces
-        out = self.model.latent_generator(
-            x_T,
-            self.scen_id,
-            plot=False,
-            enable_grads=True,
-            return_pred_only=False
-        )
-
-    
-        full_world, pred_eval_local, mask_eval, eval_mask = out
-
-        #full_world = out
-        
-        # Robustness over the whole fused world trajectory
-        #robustness = su.toy_safety_function(full_world, min_dist=2.0)
-        #robustness = su.evaluate_reach_property(full_world, left_label=1, right_label=1, threshold_1=3.0, threshold_2=3.0)
-        #robustness = su.evaluate_reach_property_mask(full_world, mask_eval, eval_mask, left_label=1, right_label=1, threshold_1=3.0, threshold_2=3.0)
-        robustness = sp.evaluate_eg_reach_mask(full_world, mask_eval, eval_mask, self.node_types, left_label=[0,1], right_label=[0,1,2], threshold_1=2.0, threshold_2=3.0, d_max=70)
-        return robustness
-
-
-        #return self.model.latent_generator(x_T, self.scen_id, plot=False, enable_grads=True, return_pred_only=False)
 
 if __name__ == '__main__':
-    pl.seed_everything(20 , workers=True)
+    pl.seed_everything(3 , workers=True)
 
     parser = ArgumentParser()
     parser.add_argument('--root', type=str, required=True)
@@ -124,6 +109,9 @@ if __name__ == '__main__':
     
     parser.add_argument('--cost_param_costl', type = float, default = 1.0)
     parser.add_argument('--cost_param_threl', type = float, default = 1.0)
+
+    parser.add_argument('--property', type=str, default='reach_uns',
+                        choices=['reach_uns', 'head_real', 'ped_unsafe', 'reach_simp'])
     
     args = parser.parse_args()
 
@@ -142,36 +130,35 @@ if __name__ == '__main__':
     model.num_eval_samples = args.num_eval_samples
     model.eval_mode_error_2 = args.eval_mode_error_2
 
-    test_dataset = {
-        'argoverse_v2': ArgoverseV2Dataset,
-    }[model.dataset](root=args.root, split=split,
-                     transform=TargetBuilder(model.num_historical_steps, model.num_future_steps))
-    
-    dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
-                            pin_memory=args.pin_memory, persistent_workers=args.persistent_workers)
+    test_dataset = ArgoverseV2Dataset(
+        root=args.root,
+        split=split,
+        transform=TargetBuilder(model.num_historical_steps, model.num_future_steps)
+    )
 
-    iterator = iter(dataloader)
-    data_batch = next(iterator)
+    scen_idx = 1359
 
-    i = 5 # select scenario in the batch
+    num_agents = 19
+
+    num_dim = 10
+
     
-    first_graph = data_batch.to_data_list()[i]
+    
 
     # Turn it back into a HeteroDataBatch object (the only one working)
-    first_graph = Batch.from_data_list([first_graph])
+    graph = test_dataset[scen_idx]
+    graph = Batch.from_data_list([graph])
+    model.cond_data = graph
 
-    model.cond_data = first_graph
 
-    
-    
-
-    # Getting an input with the right dimensionality
-    num_agents = 5 # Number of predictable trajectories in the batch
     num_dim = 10 # Latent dim
     x_T = torch.randn([num_agents, 1, num_dim])
     
-    full_world, pred_eval_local, mask_eval, eval_mask, full_types = model.latent_generator(x_T, i, plot=False, enable_grads=True, return_pred_only=False, return_types=True)
-    pred_local, pred_types = model.latent_generator(x_T, i, plot=False, enable_grads=True, return_pred_only=True, return_types=True)
+    full_world, pred_eval_local, mask_eval, eval_mask, full_types = model.latent_generator(x_T, scen_idx, plot=False, enable_grads=True, return_pred_only=False, return_types=True)
+    
+    tmax, tglob = su.estimate_heading_thresholds(full_world)
+    
+    pred_local, pred_types = model.latent_generator(x_T, scen_idx, plot=False, enable_grads=True, return_pred_only=True, return_types=True)
     
     N, T, _ = full_world.shape
     print("Full types:", full_types)
@@ -180,21 +167,67 @@ if __name__ == '__main__':
     print("pred type shape:", pred_types.size())
 
     # Node categories (adapt if you have heterogeneous agents)
-    node_types = full_types
+    if args.property == 'head_real':
+        node_types = pred_types
+    else:
+        node_types = full_types
 
     #node_types = torch.zeros(N, dtype=torch.long)
-    full_reshaped = su.reshape_trajectories(full_world, node_types)
+    full_reshaped = su.reshape_trajectories(full_world, full_types)
 
+    
     su.summarize_reshaped(full_reshaped)
-    #print("full world", full_world[0])
-    #print("imputed full", imputed_full[0])
-    #print("traj requires grad:", full_world.requires_grad)
-    #print("traj grad_fn:", full_world.grad_fn)
-    print('only pred size is ', model.latent_generator(x_T, i, plot=False, enable_grads=True, return_pred_only=True).size())
-    print('full pred size is ', full_world.size())
+    try:
+        avg_ped_veh = su.average_intertype_distance(full_world, full_types, type_a=Agent.PEDESTRIAN, type_b=Agent.VEHICLE)
+        print(f"Average pedestrian–vehicle distance: {avg_ped_veh:.2f} m")
+    except:
+        print('failed printing interype distance')
+    class GenFromLatent(pl.LightningModule):
+        def __init__(self, model, scen_id, types, property_name="reach_uns", tmax=0.2, tglob=3):
+            super().__init__()
+            self.model = model
+            self.scen_id = scen_id
+            self.node_types = types
+            self.property_name = property_name
+            self.tmax = tmax
+            self.tglob = tglob
+
+        def forward(self, z):
+
+
+
+            out = self.model.latent_generator(
+                z,
+                self.scen_id,
+                plot=False,
+                enable_grads=True,
+                return_pred_only=False,
+
+            )
+            full_world, pred_eval_local, mask_eval, eval_mask = out
+
+            # Choose STREL property
+            if self.property_name == "head_real":
+                robustness = sp.evaluate_heading_stability_real(pred_eval_local, self.node_types, self.tmax, self.tglob)
+            elif self.property_name == "reach_uns":
+                robustness = sp.evaluate_eg_reach_mask(
+                    full_world, mask_eval, eval_mask, self.node_types,
+                    left_label=[0,1,2,3,4], right_label=[0,1,2,3,4], threshold_1=0.7, threshold_2=1.0, d_max=5
+                )
+            elif self.property_name == "reach_simp":
+                robustness = sp.evaluate_simple_reach(
+                    full_world, mask_eval, eval_mask, self.node_types,
+                    left_label=[0,1,2,3,4], right_label=[0,1,2,3,4], threshold_1=1.3, threshold_2=1.0, d_max=5
+                )
+            elif self.property_name == "ped_unsafe":
+                robustness = sp.evaluate_ped_somewhere_unsafe(full_world, mask_eval, eval_mask, self.node_types, d_zone= 150)
+            else:
+                raise ValueError(f"Unknown property type '{self.property_name}'")
+
+            return robustness
     
     
-    gen_model = GenFromLatent(model, i, node_types)
+    gen_model = GenFromLatent(model, scen_idx, node_types, property_name=args.property, tmax = tmax, tglob = tglob)
     gen_model.eval()
     #pred = model.latent_generator(x_T, i, plot=True)
     z_param = torch.nn.Parameter(x_T.clone())
@@ -204,9 +237,9 @@ if __name__ == '__main__':
     g = torch.autograd.grad(robust, z_param, retain_graph=True, allow_unused=True)[0]
     print("‖grad‖:", 0.0 if g is None else g.detach().abs().max().item())
 
-    z_opt = su.grad_ascent_opt(qmodel = gen_model, z0 = x_T, lr=0.005, tol=1e-12)
+    z_opt = su.grad_ascent_reg(qmodel = gen_model, z0 = x_T, lr=0.005, tol=1e-12, lambda_reg=0.00)
 
-    z_reg = su.grad_ascent_reg(qmodel = gen_model, z0 = x_T, lr=0.005, tol=1e-12, lambda_reg=0.01)
+    z_reg = su.grad_ascent_reg(qmodel = gen_model, z0 = x_T, lr=0.005, tol=1e-12, lambda_reg=0.001)
 
     print("Initial latent point:", x_T)
     print("Optimal latent point:", z_opt)
@@ -228,11 +261,11 @@ if __name__ == '__main__':
     #model.latent_generator(x_T, i, plot=True, enable_grads=False, return_pred_only=False)
 
     
-    model.latent_generator(x_T, i, plot=True, enable_grads=False, return_pred_only=True, exp_id= "_init")
+    model.latent_generator(x_T, scen_idx, plot=True, enable_grads=False, return_pred_only=True, exp_id= f"{args.property}_init")
 
-    model.latent_generator(z_opt, i, plot=True, enable_grads=False, return_pred_only=True, exp_id= "_opt")
+    model.latent_generator(z_opt, scen_idx, plot=True, enable_grads=False, return_pred_only=True, exp_id= f"{args.property}_opt")
 
-    model.latent_generator(z_reg, i, plot=True, enable_grads=False, return_pred_only=True, exp_id= "_reg")
+    model.latent_generator(z_reg, scen_idx, plot=True, enable_grads=False, return_pred_only=True, exp_id= f"{args.property}_reg")
             
     #print(model.cond_data['agent']['predict_mask'].sum()) # should be equal to num_agents
     #print(model.cond_data['agent']['valid_mask'].sum())

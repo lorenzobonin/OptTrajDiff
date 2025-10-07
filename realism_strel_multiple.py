@@ -44,48 +44,34 @@ Agent = Enum('Agent', [('VEHICLE', 0),('PEDESTRIAN', 1),('CYCLIST', 2),
 # ============================================================
 
 class GenFromLatent(pl.LightningModule):
-        def __init__(self, model, scen_id, types, property_name="reach_uns", tmax=0.2, tglob=3):
-            super().__init__()
-            self.model = model
-            self.scen_id = scen_id
-            self.node_types = types
-            self.property_name = property_name
-            self.tmax = tmax
-            self.tglob = tglob
+    def __init__(self, model, scen_id, node_types, property_name="reach", tmax=0.2, tglob=3):
+        super().__init__()
+        self.model = model
+        self.scen_id = scen_id
+        self.node_types = node_types
+        self.property_name = property_name
+        self.tmax = tmax
+        self.tglob = tglob
 
-        def forward(self, z):
+    def forward(self, z):
+        out = self.model.latent_generator(
+            z,
+            self.scen_id,
+            plot=False,
+            enable_grads=True,
+            return_pred_only=False,
 
+        )
+        full_world, pred_eval_local, mask_eval, eval_mask = out
 
+        # Choose STREL property
+        if self.property_name == "head_real":
+            robustness = sp.evaluate_heading_stability_real(pred_eval_local, self.node_types, self.tmax, self.tglob)
 
-            out = self.model.latent_generator(
-                z,
-                self.scen_id,
-                plot=False,
-                enable_grads=True,
-                return_pred_only=False,
+        else:
+            raise ValueError(f"Unknown property type '{self.property_name}'")
 
-            )
-            full_world, pred_eval_local, mask_eval, eval_mask = out
-
-            # Choose STREL property
-            if self.property_name == "head_real":
-                robustness = sp.evaluate_heading_stability_real(pred_eval_local, self.node_types, self.tmax, self.tglob)
-            elif self.property_name == "reach_uns":
-                robustness = sp.evaluate_eg_reach_mask(
-                    full_world, mask_eval, eval_mask, self.node_types,
-                    left_label=[0,1,2,3,4], right_label=[0,1,2,3,4], threshold_1=0.7, threshold_2=1.0, d_max=5
-                )
-            elif self.property_name == "reach_simp":
-                robustness = sp.evaluate_simple_reach(
-                    full_world, mask_eval, eval_mask, self.node_types,
-                    left_label=[], right_label=[], threshold_1=1.3, threshold_2=1.0, d_max=5
-                )
-            elif self.property_name == "ped_unsafe":
-                robustness = sp.evaluate_ped_somewhere_unsafe(full_world, mask_eval, eval_mask, self.node_types, d_zone= 150)
-            else:
-                raise ValueError(f"Unknown property type '{self.property_name}'")
-
-            return robustness
+        return robustness
 
 
 # ============================================================
@@ -93,7 +79,7 @@ class GenFromLatent(pl.LightningModule):
 # ============================================================
 
 if __name__ == '__main__':
-    seed_value = 2016
+    seed_value = 20
     pl.seed_everything(seed_value, workers=True)
 
     parser = ArgumentParser()
@@ -131,8 +117,8 @@ if __name__ == '__main__':
     parser.add_argument('--cost_param_costl', type = float, default = 1.0)
     parser.add_argument('--cost_param_threl', type = float, default = 1.0)
     # === Optimization-specific arguments ===
-    parser.add_argument('--property', type=str, default='reach_uns',
-                        choices=['reach_uns', 'head_real', 'ped_unsafe', 'reach_simp'])  
+    parser.add_argument('--property', type=str, default='reach',
+                        choices=['reach_unsafe', 'safe_lane', 'cyclist_yield', 'head_real', 'safe_lane', 'ped_some','ped_yield','reach_adapt', 'veh_space','ped_clear'])
     parser.add_argument('--num_samples', type=int, default=5)
     parser.add_argument('--lambda_reg', type=float, default=0.01)
     parser.add_argument('--lr', type=float, default=0.005)
@@ -166,14 +152,14 @@ if __name__ == '__main__':
         transform=TargetBuilder(model.num_historical_steps, model.num_future_steps)
     )
 
-    #Example list of scenarios
-    top_num_agents_scenarios = [
-         (25, 7520), (24, 11135), (23, 4611),
-         (20, 6323),
-        (19, 1359), (19, 6937)
-    ]
+    # Example list of scenarios
+    # top_num_agents_scenarios = [
+    #      (25, 7520), (24, 11135), (23, 4611),
+    #      (20, 6323),
+    #     (19, 1359), (19, 6937)
+    # ]
 
-    #top_num_agents_scenarios = [(19, 6937), (20, 6323), (19, 1359)]
+    top_num_agents_scenarios = [(19, 6937), (19, 1359)]
 
     num_dim = 10
     save_dir = f"outputs_{args.property}"
@@ -197,8 +183,6 @@ if __name__ == '__main__':
     # ========================================================
 
     for num_agents, scen_idx in top_num_agents_scenarios:
-        time_start = time.time()
-        
         print(f"\n=== Scenario {scen_idx} (agents={num_agents}) ===")
 
         # Load graph and bind conditioning
@@ -207,14 +191,12 @@ if __name__ == '__main__':
         model.cond_data = graph
         x_T = torch.randn([num_agents, 1, num_dim])
     
-        full_world, pred_eval_local, mask_eval, eval_mask, full_types = model.latent_generator(x_T, scen_idx, plot=False, enable_grads=True, return_pred_only=False, return_types=True)
+        full_world, pred_eval_local, mask_eval, eval_mask, node_types = model.latent_generator(x_T, scen_idx, plot=False, enable_grads=True, return_pred_only=False, return_types=True)
         
         rec_pred, pred_types = model.latent_generator(x_T, scen_idx, plot=False, enable_grads=True, return_pred_only=True, return_types=True)
 
 
-        full_reshaped = su.reshape_trajectories(full_world, full_types)
-
-
+        full_reshaped = su.reshape_trajectories(full_world, node_types)
 
         print("Full world summary:")
         su.summarize_reshaped(full_reshaped)
@@ -223,15 +205,11 @@ if __name__ == '__main__':
         print("Reconstructed prediction summary:")
         su.summarize_reshaped(loc_reshaped)
 
-        tmax, tglob = su.estimate_heading_thresholds(full_world)
-        if args.property == 'head_real':
-            node_types = pred_types
-        else:
-            node_types = full_types
+        tmax, tglob = su.estimate_heading_thresholds(rec_pred)
 
         z0 = torch.randn([num_agents, args.num_samples, num_dim], device=args.device)
 
-        gen_model = GenFromLatent(model, scen_idx, node_types, property_name=args.property, tmax=tmax, tglob=tglob).to(args.device)
+        gen_model = GenFromLatent(model, scen_idx, pred_types, property_name=args.property, tmax=tmax, tglob=tglob).to(args.device)
 
         # --- Evaluate initial robustness per sample ---
         rob_init = []
@@ -302,8 +280,7 @@ if __name__ == '__main__':
             "perc_neg_init": perc_neg_init,
             "perc_neg_opt": perc_neg_opt,
         }
-        time_end = time.time()
-        print(f"Complete optimization of the scenario: {time_end - time_start:.4f}")
+
         print(f"Finished scenario {scen_idx} ({args.property}) — results saved in {save_dir}/")
 
     # ========================================================

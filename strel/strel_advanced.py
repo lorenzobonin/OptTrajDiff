@@ -599,7 +599,7 @@ class Since(Node):
 
 
 
-class Reach(Node):
+class Reach_old(Node):
     """
     Vectorized Reach operator (multi-hop) with distance-bounded paths.
 
@@ -787,7 +787,7 @@ class Reach(Node):
 
 
 
-class Reach_vec(Node):
+class Reach(Node):
     """
     Vectorized Reach operator (multi-hop) with distance-bounded paths.
 
@@ -962,273 +962,7 @@ class Reach_vec(Node):
 
 
 
-
-# ---------------------
-#     ESCAPE
-# ---------------------
-
 class Escape(Node):
-    """
-    Escape operator for STREL. Models escape condition over dynamic spatial graphs.
-    Computes distances separately for each batch and timestep.
-    """
-
-    def __init__(
-        self,
-        child: Node,
-        d1: realnum,
-        d2: realnum,
-        labels: list = [],
-        distance_domain_min: realnum = 0.,
-        distance_domain_max: realnum = float('inf'),
-        distance_function: str = 'Euclid'
-    ) -> None:
-        super().__init__()
-        self.child = child
-        self.d1 = d1
-        self.d2 = d2
-        self.distance_domain_min = distance_domain_min
-        self.distance_domain_max = distance_domain_max
-        self.labels = labels
-        self.distance_function = distance_function
-
-        # Will be computed from input data
-        self.weight_matrix = None  # Shape: [batch, timesteps, nodes, nodes]
-        self.adjacency_matrix = None  # Shape: [batch, timesteps, nodes, nodes]
-        self.num_nodes = None  # Will be set during first computation
-
-        self.boolean_min_satisfaction = torch.tensor(0.0)
-        # self.quantitative_min_satisfaction = torch.tensor(-1e6, dtype=torch.float32)
-        self.quantitative_min_satisfaction = torch.tensor(float('-inf'))
-
-    def _initialize_matrices(self, x: Tensor) -> None:
-        """Initialize graph matrices from input trajectory data"""
-        if self.weight_matrix is None:
-            if self.distance_function == 'Euclid':
-                self.weight_matrix = _compute_euclidean_distance_matrix(x)
-            elif self.distance_function == 'Front':
-                self.weight_matrix = _compute_front_distance_matrix(x)
-            elif self.distance_function == 'Back':
-                self.weight_matrix = _compute_back_distance_matrix(x)
-            elif self.distance_function == 'Right':
-                self.weight_matrix = _compute_right_distance_matrix(x)
-            elif self.distance_function == 'Left':
-                self.weight_matrix = _compute_left_distance_matrix(x)
-            else: 
-                print('Error: Unknown distance function!!')
-            self.adjacency_matrix = (self.weight_matrix > 0).int()
-            self.num_nodes = self.weight_matrix.shape[2]
-
-            lab = x[:,:,-1,:]
-            if len(self.labela) > 0:
-                self.mask = torch.zeros_like(lab)
-                for l in range(len(self.labels)):
-                    self.mask = self.mask + (lab == l)
-                self.mask.to(torch.bool)   # [B, N, T]
-
-    def neighbors_fn(self, node: int, batch_idx: int, time_idx: int) -> List[Tuple[int, float]]:
-        """Get incoming neighbors for specific batch and timestep"""
-        if self.adjacency_matrix is None:
-            raise RuntimeError("Matrices not initialized. Call _boolean or _quantitative first.")
-
-        mask = (self.adjacency_matrix[batch_idx, time_idx, :, node] > 0)
-        neighbor_indices = torch.arange(self.num_nodes)[mask]
-        return [(i.item(), self.weight_matrix[batch_idx, time_idx, i, node].item())
-                for i in neighbor_indices]
-
-    def forward_neighbors_fn(self, node: int, batch_idx: int, time_idx: int) -> List[Tuple[int, float]]:
-        """Get outgoing neighbors for specific batch and timestep"""
-        if self.adjacency_matrix is None:
-            raise RuntimeError("Matrices not initialized. Call _boolean or _quantitative first.")
-
-        mask = (self.adjacency_matrix[batch_idx, time_idx, node, :] > 0)
-        neighbor_indices = torch.arange(self.num_nodes)[mask.bool()]
-        return [(j.item(), self.weight_matrix[batch_idx, time_idx, node, j].item())
-                for j in neighbor_indices]
-
-
-    def colored_neighbors_fn(self, node: int, batch_idx: int, time_idx: int) -> List[Tuple[int, float]]:
-        """Get incoming neighbors for specific batch and timestep"""
-        if self.adjacency_matrix is None:
-            raise RuntimeError("Matrices not initialized. Call _boolean or _quantitative first.")
-
-        mask = self.adjacency_matrix[batch_idx, time_idx, :, node] * self.mask[batch_idx, :, time_idx].int() 
-        
-        
-        neighbor_indices = torch.arange(self.num_nodes)[mask.bool()]
-        
-        return [(i.item(), self.weight_matrix[batch_idx, time_idx, i, node].item())
-                for i in neighbor_indices]
-
-    def colored_forward_neighbors_fn(self, node: int, batch_idx: int, time_idx: int) -> List[Tuple[int, float]]:
-        """Get incoming neighbors for specific batch and timestep"""
-        if self.adjacency_matrix is None:
-            raise RuntimeError("Matrices not initialized. Call _boolean or _quantitative first.")
-
-        mask = self.adjacency_matrix[batch_idx, time_idx, node, :] * self.mask[batch_idx, :, time_idx].int() 
-        
-        
-        neighbor_indices = torch.arange(self.num_nodes)[mask.bool()]
-        
-        return [(j.item(), self.weight_matrix[batch_idx, time_idx, node, j].item())
-                for j in neighbor_indices]
-
-
-    def _compute_min_distance_matrix(self, batch_idx: int, time_idx: int) -> Tensor:
-        """Compute minimum distance matrix for specific batch and timestep"""
-        n = self.num_nodes
-        D = torch.full((n, n), float('inf'))
-
-        for start in range(n):
-            visited = torch.zeros(n, dtype=torch.bool)
-            distance = torch.full((n,), float('inf'))
-            distance[start] = 0
-            frontier = torch.zeros(n, dtype=torch.bool)
-            frontier[start] = True
-
-            while frontier.any():
-                next_frontier = torch.zeros(n, dtype=torch.bool)
-                for node in torch.nonzero(frontier).flatten():
-                    node = node.item()
-                    visited[node] = True
-
-                    for neighbor, weight in self.colored_forward_neighbors_fn(node, batch_idx, time_idx):
-                        if visited[neighbor]:
-                            continue
-
-                        new_dist = distance[node] + weight
-                        if new_dist < distance[neighbor]:
-                            distance[neighbor] = new_dist
-                            next_frontier[neighbor] = True
-
-                frontier = next_frontier
-
-            D[start] = distance
-
-        return D
-
-    # -----------------------------
-    #     Boolean (Escape)
-    # -----------------------------
-
-    def _boolean(self, x: Tensor) -> Tensor:
-        self._initialize_matrices(x)
-        s1 = self.child._boolean(x) # Shape: [batch, nodes, 1, timesteps]
-
-        s1 = s1*self.mask.unsqueeze(2)
-
-        batch_size, num_nodes, _, num_timesteps = s1.shape
-        s_batch = torch.zeros((batch_size, num_nodes, 1, num_timesteps),
-                            dtype=torch.float32,
-                            requires_grad=True)
-
-        for b in range(batch_size):
-            for t in range(num_timesteps):
-                D = self._compute_min_distance_matrix(b, t)
-
-                e = torch.ones((num_nodes, num_nodes),
-                             dtype=torch.float32,
-                             requires_grad=True) * self.boolean_min_satisfaction
-                e = e - torch.diag(torch.diag(e)) + torch.diag(s1[b, :, :, t])
-
-                T = [(i, i) for i in range(num_nodes)]
-
-                while T:
-                    T_prime = []
-                    e_prime = e.clone()
-
-                    for l1, l2 in T:
-                        for l1_prime, w in self.colored_neighbors_fn(l1, b, t):
-                            new_val = torch.minimum(s1[b, l1_prime, :, t], e[l1, l2])
-                            old_val = e[l1_prime, l2]
-                            combined = torch.maximum(old_val, new_val)
-
-                            if combined != old_val:
-                                e_prime = e_prime.clone().index_put_(tuple(torch.tensor([[l1_prime], [l2]])), combined)
-                                T_prime.append((l1_prime, l2))
-
-                    T = T_prime
-                    e = e_prime
-
-                s = torch.ones(num_nodes, dtype=torch.float32, requires_grad=True) * self.boolean_min_satisfaction
-
-                for i in range(num_nodes):
-                    vals = [e[i, j] for j in range(num_nodes) if self.d1 <= D[i, j] <= self.d2]
-                    if vals:
-                        max_val = torch.stack(vals).max()
-                        s = s.clone().scatter_(0, torch.tensor([i]), max_val.unsqueeze(0))
-
-                s_batch = s_batch.clone()
-                s_batch.index_put_((torch.tensor([b]), torch.arange(num_nodes), torch.tensor([0]), torch.tensor([t])), s)
-
-        return s_batch.bool()
-
-    # -----------------------------
-    #     Quantitative (Escape)
-    # -----------------------------
-
-    def _quantitative(self, x: Tensor, normalize: bool = False) -> Tensor:
-        self._initialize_matrices(x)
-        s1 = self.child._quantitative(x, normalize) # Shape: [batch, nodes, 1, timesteps]
-
-        s1[self.mask.unsqueeze(2)==False] = self.quantitative_min_satisfaction
-
-        batch_size, num_nodes, _, num_timesteps = s1.shape
-        s_batch = torch.zeros((batch_size, num_nodes, 1, num_timesteps),
-                            dtype=s1.dtype,
-                            requires_grad=True)
-
-        for b in range(batch_size):
-            for t in range(num_timesteps):
-                D = self._compute_min_distance_matrix(b, t)
-
-                # Differentiable diagonal assignment using torch.where
-                base = torch.full((num_nodes, num_nodes), self.quantitative_min_satisfaction, dtype=s1.dtype)
-                diag_mask = torch.eye(num_nodes, dtype=torch.bool)
-                e = torch.where(diag_mask, s1[b, :, 0, t].unsqueeze(0).expand(num_nodes, num_nodes), base)
-
-                T = [(i, i) for i in range(num_nodes)]
-
-                while T:
-                    T_prime = []
-                    e_prime = e.clone()
-
-                    for l1, l2 in T:
-                        for l1_prime, w in self.neighbors_fn(l1, b, t):
-
-                            new_val = torch.minimum(s1[b, l1_prime, :, t], e[l1, l2])
-                            old_val = e[l1_prime, l2]
-                            combined = torch.maximum(old_val, new_val)
-
-                            if combined != old_val:
-                                e_prime = e_prime.clone().index_put_(
-                                    tuple(torch.tensor([[l1_prime], [l2]])), combined
-                                )
-                                T_prime.append((l1_prime, l2))
-
-                    T = T_prime
-                    e = e_prime
-
-                s = torch.ones(num_nodes,
-                             dtype=s1.dtype,
-                             requires_grad=True) * self.quantitative_min_satisfaction
-
-                for i in range(num_nodes):
-                    vals = [e[i, j] for j in range(num_nodes) if self.d1 <= D[i, j] <= self.d2]
-                    if vals:
-                        max_val = torch.stack(vals).max()
-                        s = s.clone().scatter_(0,
-                                             torch.tensor([i]),
-                                             max_val.unsqueeze(0))
-
-                s_batch = s_batch.clone()
-                s_batch.index_put_((torch.tensor([b]), torch.arange(num_nodes), torch.tensor([0]), torch.tensor([t])), s)
-
-        return s_batch
-
-
-
-class Escape_vec(Node):
     """
     Vectorized Escape operator (multi-hop) with distance-bounded paths.
 
@@ -1404,7 +1138,7 @@ class Somewhere(Node):
         self.true_node = Atom(0, float('inf'), lte=True)
 
         # Reach(True, φ)
-        self.reach_op = Reach_vec(
+        self.reach_op = Reach(
             left_child=self.true_node,
             right_child=child,
             d1=self.d1,
@@ -1516,7 +1250,7 @@ class Surround(Node):
         self.complementary_labels = all_labels
 
         # Reach( φ1 , ¬(φ1 ∨ φ2) )
-        self.reach_op = Reach_vec(
+        self.reach_op = Reach(
             left_child=self.left_child,
             right_child=Not(Or(self.left_child, self.right_child)),
             d1=self.d1, d2=d2,
@@ -1529,7 +1263,7 @@ class Surround(Node):
         self.neg_reach = Not(self.reach_op)
 
         # Escape(φ1)
-        self.escape_op = Escape_vec(
+        self.escape_op = Escape(
             child=self.left_child,
             d1=d2, d2=distance_domain_max,
             distance_domain_min=distance_domain_min,
