@@ -73,7 +73,7 @@ def plot_trajectories(trajectories, filename="trajectories.png"):
 
 
 if __name__ == '__main__':
-    pl.seed_everything(3 , workers=True)
+    pl.seed_everything(45 , workers=True)
 
     parser = ArgumentParser()
     parser.add_argument('--root', type=str, required=True)
@@ -111,7 +111,7 @@ if __name__ == '__main__':
     parser.add_argument('--cost_param_threl', type = float, default = 1.0)
 
     parser.add_argument('--property', type=str, default='reach_uns',
-                        choices=['reach_uns', 'head_real', 'ped_unsafe', 'reach_simp'])
+                        choices=['reach_uns', 'head_real', 'ped_unsafe', 'reach_simp', 'pred_reach'])
     
     args = parser.parse_args()
 
@@ -167,7 +167,7 @@ if __name__ == '__main__':
     print("pred type shape:", pred_types.size())
 
     # Node categories (adapt if you have heterogeneous agents)
-    if args.property == 'head_real':
+    if args.property == 'head_real' or args.property == 'pred_reach':
         node_types = pred_types
     else:
         node_types = full_types
@@ -175,7 +175,7 @@ if __name__ == '__main__':
     #node_types = torch.zeros(N, dtype=torch.long)
     full_reshaped = su.reshape_trajectories(full_world, full_types)
 
-    
+    print('salerno')
     su.summarize_reshaped(full_reshaped)
     try:
         avg_ped_veh = su.average_intertype_distance(full_world, full_types, type_a=Agent.PEDESTRIAN, type_b=Agent.VEHICLE)
@@ -212,12 +212,17 @@ if __name__ == '__main__':
             elif self.property_name == "reach_uns":
                 robustness = sp.evaluate_eg_reach_mask(
                     full_world, mask_eval, eval_mask, self.node_types,
-                    left_label=[0,1,2,3,4], right_label=[0,1,2,3,4], threshold_1=0.7, threshold_2=1.0, d_max=5
+                    left_label=[], right_label=[], threshold_1=1.3, threshold_2=1.0, d_max=10
+                )
+            elif self.property_name == "pred_reach":
+                robustness = sp.evaluate_eg_reach(
+                    pred_eval_local, mask_eval, eval_mask, self.node_types,
+                    left_label=[0,1,2,3,4], right_label=[0,1,2,3,4], threshold_1=1.3, threshold_2=1.0, d_max=20
                 )
             elif self.property_name == "reach_simp":
                 robustness = sp.evaluate_simple_reach(
                     full_world, mask_eval, eval_mask, self.node_types,
-                    left_label=[0,1,2,3,4], right_label=[0,1,2,3,4], threshold_1=1.3, threshold_2=1.0, d_max=5
+                    left_label=[0,1,2,3,4], right_label=[0,1,2,3,4], threshold_1=1.3, threshold_2=1.0, d_max=20
                 )
             elif self.property_name == "ped_unsafe":
                 robustness = sp.evaluate_ped_somewhere_unsafe(full_world, mask_eval, eval_mask, self.node_types, d_zone= 150)
@@ -237,9 +242,9 @@ if __name__ == '__main__':
     g = torch.autograd.grad(robust, z_param, retain_graph=True, allow_unused=True)[0]
     print("‖grad‖:", 0.0 if g is None else g.detach().abs().max().item())
 
-    z_opt = su.grad_ascent_reg(qmodel = gen_model, z0 = x_T, lr=0.005, tol=1e-12, lambda_reg=0.00)
+    z_opt = su.grad_ascent_reg(qmodel = gen_model, z0 = x_T, lr=0.01, tol=1e-12, lambda_reg=-0.001, max_steps=700)
 
-    z_reg = su.grad_ascent_reg(qmodel = gen_model, z0 = x_T, lr=0.005, tol=1e-12, lambda_reg=0.001)
+    z_reg = su.grad_ascent_reg(qmodel = gen_model, z0 = x_T, lr=0.01, tol=1e-12, lambda_reg=0.001, max_steps=700)
 
     print("Initial latent point:", x_T)
     print("Optimal latent point:", z_opt)

@@ -583,7 +583,7 @@ class GuidedDiffNet(DiffNet):
             gt_eval_local_all = gt[eval_mask][..., :2]       # [N_eval_all, 60, 2]
 
             # Start with GT for all agents
-            full_local = gt[:, :T, :2].clone()               # [N_total, 60, 2]
+            full_local = gt[:, -T:, :2].clone()               # [N_total, 60, 2]
 
             # Fused eval (for display/logging only)
             fused_eval_local_all = pred_eval_local_all * mask_eval_all.float() \

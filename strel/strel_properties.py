@@ -178,7 +178,7 @@ def evaluate_eg_reach_mask(
         is_unbounded=False,
         left_label=left_label,
         right_label=right_label,
-        distance_function="Front"
+        distance_function="Euclid"
     )
 
     # Temporal nesting: Eventually(Globally(Reach))
@@ -186,7 +186,7 @@ def evaluate_eg_reach_mask(
     evgl = Eventually(reach, right_time_bound=T-1) ###!!!! check if correct
 
     # Quantitative semantics
-    vals = evgl.quantitative(traj, normalize=False)  # [B,N,1,T]
+    vals = evgl.quantitative(traj, normalize=True)  # [B,N,1,T]
     vals = vals.squeeze(2)[0]                        # [N,T]
 
     # Masking: only predicted entries
@@ -204,9 +204,9 @@ def evaluate_eg_reach_mask(
         robustness = torch.tensor(0.0, device=device)
     else:
         #!!! check su valore esatto della robustness
-         alpha = 20.0
-         robustness = (1.0/alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
-        #robustness = torch.max(selected)
+        alpha = 20.0
+        #robustness = (1.0/alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
+        robustness = torch.sum(selected)
     #time_end = time.time()
     #print(f"Eventually-Globally-Reach eval time: {time_end - time_start:.4f}")
     return robustness
@@ -252,7 +252,7 @@ def evaluate_simple_reach(
         is_unbounded=False,
         left_label=left_label,
         right_label=right_label,
-        distance_function="Front"
+        distance_function="Euclid"
     )
 
     # Temporal nesting: Eventually(Globally(Reach))
@@ -260,7 +260,7 @@ def evaluate_simple_reach(
     ###!!!! check if correct
 
     # Quantitative semantics
-    vals = reach.quantitative(traj, normalize=False)  # [B,N,1,T]
+    vals = reach.quantitative(traj, normalize=True)  # [B,N,1,T]
     vals = vals.squeeze(2)[0]                        # [N,T]
 
     # Masking: only predicted entries
@@ -277,11 +277,86 @@ def evaluate_simple_reach(
         robustness = torch.tensor(0.0, device=device)
     else:
         #!!! check su valore esatto della robustness
-         alpha = 20.0
-         robustness = (1.0/alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
+        alpha = 20.0
+        robustness = (1.0/alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
         #robustness = torch.max(selected)
     #time_end = time.time()
     #print(f"Eventually-Globally-Reach eval time: {time_end - time_start:.4f}")
+    robustness = torch.sum(selected)
+    return robustness
+
+
+
+
+def evaluate_eg_reach(
+        full_world,
+        mask_eval_scene,
+        eval_idx_scene,
+        node_types,
+        left_label,
+        right_label,
+        threshold_1,
+        threshold_2,
+        d_max=50.0):
+    """
+    Property: Eventually Globally ( node of left_label with vel > threshold_1
+                                    reaches (Front distance, <= d_max)
+                                    node of right_label with vel < threshold_2 )
+    So a vehicle with high speed eventually comes close in front of a slow vehicle.
+    If no such pair exists, robustness is +inf (safe).
+    If such pairs exist but never satisfy the property, robustness is -inf (unsafe).
+    If some pairs satisfy the property, robustness is smooth min over them.
+    Robustness is computed at t=0.
+    """
+    time_start = time.time()
+    device = full_world.device
+    N, T, _ = full_world.shape
+
+    # Node categories (adapt if you have heterogeneous agents)
+    node_types = node_types
+    traj = su.reshape_trajectories(full_world, node_types)   # [1, N, 6, T]
+
+    # Atoms
+    fast_atom   = Atom(var_index=4, threshold=threshold_1, lte=False, labels=right_label)  # vel > thr1
+    slow_atom   = Atom(var_index=4, threshold=threshold_2, lte=True, labels=left_label)   # vel < thr2
+
+    # Spatial reach with FRONT distance
+    reach = Reach(
+        left_child=fast_atom,
+        right_child=slow_atom,
+        d1=0.0, d2=d_max,
+        is_unbounded=False,
+        left_label=left_label,
+        right_label=right_label,
+        distance_function="Euclid"
+    )
+
+    # Temporal nesting: Eventually(Globally(Reach))
+    #glob = Globally(reach)
+    evgl = Eventually(reach, right_time_bound=T-1) ###!!!! check if correct
+
+    # Quantitative semantics
+    vals = evgl.quantitative(traj, normalize=True)  # [B,N,1,T]
+    vals = vals.squeeze(2)[0]                        # [N,T]
+
+    # Masking: only predicted entries
+    # pass only one mask to optimize!!!
+
+    # Evaluate robustness only at t=0
+    #   -> take all eval agents at time 0 that are predicted
+    selected = vals[:, 0]
+
+
+    if selected.numel() == 0:
+        robustness = torch.tensor(0.0, device=device)
+    else:
+        #!!! check su valore esatto della robustness
+         alpha = 20.0
+         #robustness = (1.0/alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
+        #robustness = torch.max(selected)
+    #time_end = time.time()
+    #print(f"Eventually-Globally-Reach eval time: {time_end - time_start:.4f}")
+    robustness = torch.sum(selected)
     return robustness
 
 
@@ -315,7 +390,7 @@ def evaluate_cyclist_yield(full_world, mask_eval, eval_mask, node_types, d_max=1
     )
 
     prop = Eventually(Not(reach))
-    vals = prop.quantitative(traj, normalize=False).squeeze(2)[0]
+    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]
 
     full_mask = torch.zeros_like(vals, dtype=torch.bool)
     full_mask[eval_mask] = mask_eval.squeeze(-1).bool()
@@ -349,7 +424,7 @@ def evaluate_surround(full_world, mask_eval, eval_mask, node_types, d_sur=8.0):
     )
 
     prop = Globally(surround)
-    vals = prop.quantitative(traj, normalize=False).squeeze(2)[0]
+    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]
 
     full_mask = torch.zeros_like(vals, dtype=torch.bool)
     full_mask[eval_mask] = mask_eval.squeeze(-1).bool()
@@ -402,7 +477,7 @@ def evaluate_ped_somewhere_unsafe(full_world, mask_eval, eval_mask, node_types, 
 
 
     # Quantitative evaluation
-    vals = prop_unsafe.quantitative(traj, normalize=False).squeeze(2)[0]
+    vals = prop_unsafe.quantitative(traj, normalize=True).squeeze(2)[0]
 
     # Align temporal dimensions if needed
     T_vals, T_mask = vals.shape[1], mask_eval.shape[1]
@@ -433,7 +508,7 @@ def evaluate_vehicle_spacing(full_world, mask_eval, eval_mask, node_types, d_saf
         left_label=[0], right_label=[0]
     )
     prop = Globally(Not(reach))
-    vals = prop.quantitative(traj, normalize=False).squeeze(2)[0]
+    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]
 
     vals, mask_eval = su.align_temporal_dimensions(vals, mask_eval)  # 🔧 fix
 
@@ -478,7 +553,7 @@ def evaluate_lateral_velocity(full_world, mask_eval, eval_mask, node_types, v_la
     atom = Atom(var_index=4, threshold=v_lat_max, lte=True, labels=[0])
     prop = Globally(atom)
 
-    vals = prop.quantitative(traj2, normalize=False).squeeze(2)[0]
+    vals = prop.quantitative(traj2, normalize=True).squeeze(2)[0]
     full_mask = torch.zeros_like(vals, dtype=torch.bool)
     full_mask[eval_mask] = mask_eval.squeeze(-1).bool()
     selected = vals[full_mask]
@@ -548,7 +623,7 @@ def evaluate_safe_lane_keeping(full_world, mask_eval, eval_mask, node_types,
     conj = And(And(heading_atom, vlat_atom), reach)
     prop = Globally(conj)
 
-    vals = prop.quantitative(traj2, normalize=False).squeeze(2)[0]
+    vals = prop.quantitative(traj2, normalize=True).squeeze(2)[0]
 
     # Apply evaluation mask
     T_vals = vals.shape[1]
@@ -568,6 +643,57 @@ def evaluate_safe_lane_keeping(full_world, mask_eval, eval_mask, node_types,
     # Smooth min across agents/timesteps
     alpha = 20.0
     robustness = -(1.0 / alpha) * torch.logsumexp(-alpha * selected.reshape(-1), dim=0)
+
+    return robustness
+
+def evaluate_accel_surrounded(full_world, node_types,
+                              a_ego=1.0, a_neigh=0.5, d_zone=15.0):
+    """
+    STREL property:
+      Eventually_[0,5] ( ego accelerates ∧ surrounded by braking vehicles )
+
+    Positive robustness → unsafe scenario (ego violates traffic flow).
+    Negative robustness → safe/consistent flow.
+    """
+    device = full_world.device
+    traj = su.reshape_trajectories(full_world, node_types)  # [1,N,F,T]
+    _, N, _, T = traj.shape
+
+    # === 1. Velocity magnitude and acceleration ===
+    vx, vy = traj[0,:,2,:], traj[0,:,3,:]
+    vmag = torch.sqrt(vx**2 + vy**2 + 1e-8)
+    a_mag = torch.diff(vmag, dim=1, prepend=vmag[:, :1])  # Δv per step
+
+    # === 2. Build signal tensor ===
+    traj_sig = torch.zeros((1, N, 3, T), device=device)
+    traj_sig[0,:,0,:] = a_mag.clamp(-10.0, 10.0)
+    traj_sig[0,:,1,:] = vmag
+    traj_sig[0,:,2,:] = node_types.unsqueeze(1).repeat(1, T)
+
+    # === 3. Define atoms ===
+    ego_accel = Atom(var_index=0, threshold=a_ego,  lte=False, labels=[Agent.VEHICLE, Agent.MOTORCYCLIST, Agent.BUS])   # ego accelerates
+    neigh_brake = Atom(var_index=0, threshold=-a_neigh, lte=True, labels=[Agent.VEHICLE, Agent.MOTORCYCLIST, Agent.BUS])  # others decelerate
+
+    # === 4. Surround condition: ego is surrounded by braking vehicles ===
+    surround_braking = Surround(
+        left_child=ego_accel,
+        right_child=neigh_brake,
+        d2=d_zone,
+        distance_function="Euclid",
+        left_labels=[0],
+        right_labels=[0],
+        all_labels=[0,1,2,3,4,5,6,7,8,9]  # include all agent types in distance field
+    )
+
+    # === 5. Unsafe event: ego accelerates AND is surrounded by braking vehicles ===
+    unsafe_event = And(ego_accel, surround_braking)
+
+    # === 6. Temporal envelope: eventually within a few seconds ===
+    prop = Eventually(unsafe_event, right_time_bound=min(5, T-1))
+
+    # === 7. Quantitative evaluation ===
+    vals = prop.quantitative(traj_sig, normalize=True).squeeze(2)[0]  # [N,T]
+    robustness = vals.max()  # unsafe → positive robustness
 
     return robustness
 
@@ -600,7 +726,7 @@ def evaluate_eg_reach_adaptive(full_world, mask_eval_scene, eval_idx_scene, node
                       distance_function="Front")
 
     prop = Eventually(Globally(reach))
-    vals = prop.quantitative(traj, normalize=False).squeeze(2)[0]
+    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]
 
     full_mask = torch.zeros((traj.shape[1], traj.shape[3]), dtype=torch.bool, device=full_world.device)
     full_mask[eval_idx_scene] = mask_eval_scene.squeeze(-1).bool()
@@ -670,7 +796,7 @@ def evaluate_heading_stability_real(
     prop = Globally(local_atom, right_time_bound=T-1)  # evaluate along all timesteps
 
     # === 6. Quantitative semantics ===
-    vals = prop.quantitative(traj_sig, normalize=False).squeeze(2)[0]  # [N,T]
+    vals = prop.quantitative(traj_sig, normalize=True).squeeze(2)[0]  # [N,T]
 
     #print('maximum vals', vals.max())
 
@@ -684,7 +810,8 @@ def evaluate_heading_stability_real(
 
     # === 8. Smooth min aggregation (STREL semantics) ===
     alpha = 20.0  
-    robustness = -(1.0 / alpha) * torch.logsumexp(-alpha * selected.reshape(-1), dim=0)
+    #robustness = -(1.0 / alpha) * torch.logsumexp(-alpha * selected.reshape(-1), dim=0)
+    robustness = torch.sum(selected)
     return robustness
 
 def evaluate_heading_stability_full(
@@ -742,7 +869,7 @@ def evaluate_heading_stability_full(
     prop = Globally(conj, right_time_bound=T-1)  # evaluate along all timesteps
 
     # === 6. Quantitative semantics ===
-    vals = prop.quantitative(traj_sig, normalize=False).squeeze(2)[0]  # [N,T]
+    vals = prop.quantitative(traj_sig, normalize=True).squeeze(2)[0]  # [N,T]
 
     
     selected = vals
