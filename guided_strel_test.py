@@ -16,6 +16,7 @@ import strel.strel_properties as sp
 from enum import Enum
 import copy
 import time
+import utils.safety_metrics as saf
 
 
 class Agent(Enum):
@@ -111,7 +112,7 @@ if __name__ == '__main__':
     parser.add_argument('--cost_param_threl', type = float, default = 1.0)
 
     parser.add_argument('--property', type=str, default='reach_uns',
-                        choices=['reach_uns', 'head_real', 'ped_unsafe', 'reach_simp', 'pred_reach', 'ped_pred'])
+                        choices=['reach_uns', 'head_real', 'ped_unsafe', 'reach_simp', 'pred_reach', 'ped_pred', 'surround_fast','surround_accel', 'lane_change', 'fast_slow'])
     
     args = parser.parse_args()
 
@@ -136,10 +137,17 @@ if __name__ == '__main__':
         transform=TargetBuilder(model.num_historical_steps, model.num_future_steps)
     )
 
-    scen_idx = 1359
-    num_agents = 19
-    #scen_idx = 6323
-    #num_agents = 20
+    # top_num_agents_scenarios = [(28, 18070), (25, 7520), (24, 11135), (23, 4611), (22, 23297), (20, 6323), (20, 7129), (19, 1359), (19, 6569), (19, 6937)]
+    # top_diversity_scenarios = [(11, 8709), (6, 9817), (7, 4433), (1, 7391), (10, 7928), (3, 9290), (3, 9738), (5, 10302), (9, 10863), (1, 12518)]
+
+    # scen_idx = 1359   #for interactions, bike, pedestrians
+    # num_agents = 19
+    # scen_idx = 6323     #for surround vehicles
+    # num_agents = 20
+    # scen_idx = 10863  #for surround
+    # num_agents = 9
+    scen_idx = 10863
+    num_agents = 9
     num_dim = 10
 
     
@@ -224,10 +232,19 @@ if __name__ == '__main__':
                     full_world, mask_eval, eval_mask, self.node_types,
                     left_label=[0,1,2,3,4], right_label=[0,1,2,3,4], threshold_1=1.3, threshold_2=1.0, d_max=20
                 )
+            elif self.property_name == "surround_accel":
+                robustness = sp.evaluate_accel_surrounded_mask(full_world, mask_eval, eval_mask, self.node_types)
+            elif self.property_name == "surround_fast":
+                robustness = sp.evaluate_speeding_surrounded_unsafe_mask(full_world, mask_eval, eval_mask, self.node_types)
             elif self.property_name =="ped_pred":
                 robustness = sp.evaluate_ped_somewhere_unmask_debug(pred_eval_local, self.node_types,d_zone=30)
             elif self.property_name == "ped_unsafe":
                 robustness = sp.evaluate_ped_somewhere_unsafe_mask(full_world, mask_eval, eval_mask, self.node_types, d_zone= 30)
+            elif self.property_name == "fast_slow":
+                robustness = sp.evaluate_fast_reach_slow_mask(full_world, mask_eval, eval_mask, self.node_types, d_zone= 30)
+            elif self.property_name == "lane_change":
+                robustness = sp.evaluate_unsafe_lanechange_mask(full_world, mask_eval, eval_mask, self.node_types,theta_turn=self.tmax, v_lat=1.0, d_prox=20)
+            
             else:
                 raise ValueError(f"Unknown property type '{self.property_name}'")
 
@@ -246,7 +263,7 @@ if __name__ == '__main__':
 
     z_opt = su.grad_ascent_reg(qmodel = gen_model, z0 = x_T, lr=0.1, tol=1e-12, lambda_reg=0.0, max_steps=2)
 
-    z_reg = su.grad_ascent_reg(qmodel = gen_model, z0 = x_T, lr=0.1, tol=1e-12, lambda_reg=0.001, max_steps=700)
+    z_reg = su.grad_ascent_reg(qmodel = gen_model, z0 = x_T, lr=0.1, tol=1e-12, lambda_reg=0.001, max_steps=7)
 
     print("Initial latent point:", x_T)
     print("Optimal latent point:", z_opt)
@@ -268,11 +285,16 @@ if __name__ == '__main__':
     #model.latent_generator(x_T, i, plot=True, enable_grads=False, return_pred_only=False)
 
     
-    model.latent_generator(x_T, scen_idx, plot=True, enable_grads=False, return_pred_only=True, exp_id= f"{args.property}_rand")
+    van_traj = model.latent_generator(x_T, scen_idx, plot=True, enable_grads=False, return_pred_only=True, exp_id= f"{args.property}_rand")
 
     model.latent_generator(z_opt, scen_idx, plot=True, enable_grads=False, return_pred_only=True, exp_id= f"{args.property}_opt")
 
     model.latent_generator(z_reg, scen_idx, plot=True, enable_grads=False, return_pred_only=True, exp_id= f"{args.property}_reg")
             
+    all_types=[0,1,2,3,4,5,6,7,8]
+
+    print(saf.collision_flag_per_sample(van_traj.cpu(), all_types))
+
+    print(saf.min_vehicle_related_distance_per_sample(van_traj.cpu(), all_types))
     #print(model.cond_data['agent']['predict_mask'].sum()) # should be equal to num_agents
     #print(model.cond_data['agent']['valid_mask'].sum())

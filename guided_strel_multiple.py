@@ -17,6 +17,7 @@ import strel.strel_utils as su
 import strel.strel_properties as sp
 from enum import Enum
 import time
+import utils.safety_metrics as saf
 
 
 
@@ -85,10 +86,19 @@ class GenFromLatent(pl.LightningModule):
                     full_world, mask_eval, eval_mask, self.node_types,
                     left_label=[0,1,2,3,4], right_label=[0,1,2,3,4], threshold_1=1.3, threshold_2=1.0, d_max=20
                 )
+            elif self.property_name == "surround_accel":
+                robustness = sp.evaluate_accel_surrounded_mask(full_world, mask_eval, eval_mask, self.node_types)
+            elif self.property_name == "surround_fast":
+                robustness = sp.evaluate_speeding_surrounded_unsafe_mask(full_world, mask_eval, eval_mask, self.node_types)
             elif self.property_name =="ped_pred":
                 robustness = sp.evaluate_ped_somewhere_unmask_debug(pred_eval_local, self.node_types,d_zone=30)
             elif self.property_name == "ped_unsafe":
-                robustness = sp.evaluate_ped_somewhere_unsafe(full_world, mask_eval, eval_mask, self.node_types, d_zone= 50)
+                robustness = sp.evaluate_ped_somewhere_unsafe_mask(full_world, mask_eval, eval_mask, self.node_types, d_zone= 30)
+            elif self.property_name == "fast_slow":
+                robustness = sp.evaluate_fast_reach_slow_mask(full_world, mask_eval, eval_mask, self.node_types, d_zone= 10)
+            elif self.property_name == "lane_change":
+                robustness = sp.evaluate_unsafe_lanechange_mask(full_world, mask_eval, eval_mask, self.node_types,theta_turn=self.tmax, v_lat=1.0, d_prox=20)
+            
             else:
                 raise ValueError(f"Unknown property type '{self.property_name}'")
 
@@ -100,7 +110,7 @@ class GenFromLatent(pl.LightningModule):
 # ============================================================
 
 if __name__ == '__main__':
-    seed_value = 1998
+    seed_value = 9
     pl.seed_everything(seed_value, workers=True)
 
     parser = ArgumentParser()
@@ -139,12 +149,13 @@ if __name__ == '__main__':
     parser.add_argument('--cost_param_threl', type = float, default = 1.0)
     # === Optimization-specific arguments ===
     parser.add_argument('--property', type=str, default='reach_uns',
-                        choices=['reach_uns', 'head_real', 'ped_unsafe', 'reach_simp', 'pred_reach', 'ped_pred'])  
-    parser.add_argument('--num_samples', type=int, default=5)
+                        choices=['reach_uns', 'head_real', 'ped_unsafe', 'reach_simp', 'pred_reach', 'ped_pred', 'surround_fast','surround_accel', 'lane_change', 'fast_slow'])
+    
+    parser.add_argument('--num_samples', type=int, default=20)
     parser.add_argument('--lambda_reg', type=float, default=0.001)
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--tol', type=float, default=1e-8)
-    parser.add_argument('--max_steps', type=int, default=300)
+    parser.add_argument('--max_steps', type=int, default=500)
     parser.add_argument('--split', type=str, default='val')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -179,8 +190,11 @@ if __name__ == '__main__':
     #      (20, 6323),
     #     (19, 1359), (19, 6937)
     # ]
+    #for ped unsafe
+    #top_num_agents_scenarios = [(19, 1359)]
 
-    top_num_agents_scenarios = [(19, 6937), (24, 11135), (25, 7520)]
+    #for surround
+    top_num_agents_scenarios = [(20, 6323), (25, 7520), (19, 6937)]
 
     num_dim = 10
     save_dir = f"outputs_{args.property}"
@@ -256,10 +270,10 @@ if __name__ == '__main__':
         print(f"Initial negatives: {neg_init}/{args.num_samples} ({perc_neg_init:.1f}%)")
 
         # --- Vanilla generation ---
-        model.latent_generator(
+        vanilla_traj = model.latent_generator(
             z0, scen_idx, plot=True,
             enable_grads=False, return_pred_only=True,
-            exp_id=f"{save_dir}_vanilla_{scen_idx}",
+            exp_id=f"{seed_value}_vanilla_{scen_idx}",
             img_folder=args.property,
             sub_folder=f'scen_{scen_idx}'
         )
@@ -291,10 +305,10 @@ if __name__ == '__main__':
         print(f"Optimized negatives: {neg_opt}/{args.num_samples} ({perc_neg_opt:.1f}%)")
 
         # --- Optimized generation ---
-        model.latent_generator(
+        opt_traj = model.latent_generator(
             z_opt, scen_idx, plot=True,
             enable_grads=False, return_pred_only=True,
-            exp_id=f"{save_dir}_opt_{scen_idx}",
+            exp_id=f"{seed_value}_opt_{scen_idx}",
             img_folder=args.property,
             sub_folder=f'scen_{scen_idx}'
         )
@@ -308,10 +322,59 @@ if __name__ == '__main__':
             "neg_opt": neg_opt,
             "perc_neg_init": perc_neg_init,
             "perc_neg_opt": perc_neg_opt,
+            "init_tensor": z0,
+            "opt_tensor": z_opt
         }
         time_end = time.time()
         print(f"Complete optimization of the scenario: {time_end - time_start:.4f}")
         print(f"Finished scenario {scen_idx} ({args.property}) — results saved in {save_dir}/")
+
+        try: 
+            traj_path_pkl = os.path.join(save_dir, f"{scen_idx}_vanilla_traj_seed{seed_value}.pkl")
+            opt_path_pkl = os.path.join(save_dir, f"{scen_idx}_opt_traj_seed{seed_value}.pkl")
+            zopt_path_pkl = os.path.join(save_dir, f"{scen_idx}_z_opt_seed{seed_value}.pkl")
+
+            with open(traj_path_pkl, "wb") as f:
+                pickle.dump(vanilla_traj, f)
+            
+            with open(opt_path_pkl, "wb") as f:
+                pickle.dump(opt_traj, f)
+
+            with open(zopt_path_pkl, "wb") as f:
+                pickle.dump(z_opt, f)
+        except:
+            print('cannot dump pickles!')
+        try:
+            all_types = [0,1,2,3,4,5,6,7,8]
+
+            min_d_van = saf.min_vehicle_related_distance_per_sample(vanilla_traj, all_types)
+            print('minimum distance for vanilla_traj', min_d_van)
+            min_d_opt = saf.min_vehicle_related_distance_per_sample(opt_traj, all_types)
+            print('minimum distance for vanilla_traj', min_d_opt)
+        except:
+            print('cannot compute distances!')
+        
+        try:
+            all_types = [0,1,2,3,4,5,6,7,8]
+            coll_van = saf.saf.collision_flag_per_sample(vanilla_traj, all_types)
+            print('collisions for vanilla_traj', coll_van)
+            coll_opt = saf.saf.collision_flag_per_sample(opt_traj, all_types)
+            print('collisions for vanilla_traj', coll_opt)
+        except:
+            print('cannot compute collisions!')
+        try:
+            safety_results ={
+                "orig_distance" : min_d_van,
+                "opt_distance" : min_d_opt,
+                "orig_coll" : coll_van,
+                "opt_coll" : coll_opt
+            }
+            safe_path= os.path.join(save_dir, f"{scen_idx}_safety_summary_seed{seed_value}.pkl")
+            with open(safe_path, "wb") as f:
+                pickle.dump(safety_results, f)
+        except:
+            print('cannot save safety results!')
+
 
     # ========================================================
     # Save results to pickle + JSON
@@ -329,3 +392,6 @@ if __name__ == '__main__':
     print(f"\n✅ All scenarios completed. Results saved in:")
     print(f"   → {stats_path_pkl}")
     print(f"   → {stats_path_json}")
+
+
+    

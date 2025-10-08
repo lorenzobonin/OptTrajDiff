@@ -6,6 +6,7 @@ import math
 import strel.strel_utils as su
 import numpy as np
 from enum import Enum
+import utils.safety_metrics as saf
 
 
 ######################################################
@@ -393,38 +394,79 @@ def evaluate_cyclist_yield(full_world, mask_eval, eval_mask, node_types, d_max=1
     return -torch.logsumexp(-alpha * selected.reshape(-1), dim=0) / alpha
 
 
-def evaluate_surround(full_world, mask_eval, eval_mask, node_types, d_sur=8.0):
+def evaluate_speeding_surrounded_unsafe_mask(
+        full_world,
+        mask_eval_scene,
+        eval_idx_scene,
+        node_types,
+        v_fast=1.0,        # ego is "fast" if |v| > v_fast  (m/s)
+        v_neigh_max=1.0,   # neighbors are "slow" if |v| ≤ v_neigh_max (m/s)
+        d_sur=8.0          # surrounding radius (m)
+    ):
+    """
+    Unsafe if: ∃ vehicle with |v| > v_fast that is SURROUNDED (within d_sur)
+               by slow vehicles (|v| ≤ v_neigh_max).
+    Returns a positive robustness when such an unsafe situation exists.
+
+    Shapes:
+      full_world:        [N, T, 2]
+      mask_eval_scene:   [N_eval_scene, T, 1]  (bool)
+      eval_idx_scene:    [N_eval_scene]        (long indices into global N)
+      node_types:        [N] (long)
+    """
+    device = full_world.device
+    N, T, _ = full_world.shape
+
+    # 1) STREL state: [1, N, 6, T] with features [x,y,vx,vy,|v|,type]
     traj = su.reshape_trajectories(full_world, node_types)
+    print("|v| stats:", traj[0,:,4,:].mean(), traj[0,:,4,:].max())
 
-    veh_labels = [Agent.VEHICLE, Agent.BUS, Agent.MOTORCYCLIST]
+    # 2) Atoms (put labels in the operator; atoms just pick features)
+    fast_atom   = Atom(var_index=4, threshold=v_fast,    lte=False)  # ego fast
+    slow_atom   = Atom(var_index=4, threshold=v_neigh_max, lte=True) # neighbors slow
 
-    slow_labels =[Agent.VEHICLE, Agent.PEDESTRIAN, Agent.CYCLIST, Agent.MOTORCYCLIST]
+    veh_like = [1,2]
 
-    slow_atom = Atom(var_index=4, threshold=1.0, lte=True, labels=slow_labels)  # moving pedestrian
-    veh_atom = Atom(var_index=4, threshold=0.01, lte=False, labels=veh_labels)  # moving vehicle !!!check for vel>sth
-
-    surround = Surround(
-        left_child=slow_atom,
-        right_child=veh_atom,
+    # 3) SURROUND: ego-fast location is surrounded by slow vehicles within d_sur
+    surround_slow = Surround(
+        left_child=fast_atom,
+        right_child=slow_atom,
         d2=d_sur,
         distance_function="Euclid",
-        left_labels=slow_labels,
-        right_labels=veh_labels,
-        all_labels=[Agent.VEHICLE, Agent.BUS, Agent.MOTORCYCLIST, Agent.PEDESTRIAN, Agent.CYCLIST ]  # all possible
+        left_labels=veh_like,
+        right_labels=veh_like,
+        all_labels=[0,1,2,3,4,5,6,7,8,9]
     )
 
-    prop = Globally(surround)
-    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]
+    # 4) “Exists sometime” → unsafe if this happens at any time
+    prop = Eventually(surround_slow, right_time_bound=T-1)
 
-    full_mask = torch.zeros_like(vals, dtype=torch.bool)
-    full_mask[eval_mask] = mask_eval.squeeze(-1).bool()
-    selected = vals[full_mask]
+    # 5) Quantitative semantics (STREL)
+    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]  # [N, Tv] (Tv may be 1)
 
+    # 6) Align Tv with the mask's T if STREL collapsed/changed time length
+    if vals.shape[1] != mask_eval_scene.shape[1]:
+        vals, mask_eval_scene = su.align_temporal_dimensions(vals, mask_eval_scene)
+
+    Tv = vals.shape[1]
+
+    # 7) Build full mask over agents/timesteps and evaluate at t=0
+    #    (same pattern as your working evaluate_eg_reach_mask)
+    full_mask = torch.zeros((N, Tv), dtype=torch.bool, device=device)
+    full_mask[eval_idx_scene] = mask_eval_scene.squeeze(-1).bool()
+
+    vals_t0 = vals[:, 0]        # [N]
+    mask_t0 = full_mask[:, 0]   # [N]
+    selected = vals_t0[mask_t0] # predicted entries at t=0 only
+
+    # 8) Aggregate with soft-max → positive if ∃ unsafe instance
     if selected.numel() == 0:
-        return torch.tensor(0.0, device=full_world.device)
+        return torch.tensor(0.0, device=device)
 
     alpha = 20.0
-    return torch.logsumexp(alpha * selected.reshape(-1), dim=0) / alpha
+    robustness = (1.0/alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
+    return robustness
+
 
 
 def evaluate_ped_somewhere_unsafe_mask(
@@ -494,7 +536,72 @@ def evaluate_ped_somewhere_unsafe_mask(
     robustness = (1.0 / alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
     return robustness
 
+def evaluate_fast_reach_slow_mask(
+        full_world,
+        mask_eval_scene,
+        eval_idx_scene,
+        node_types,
+        d_zone=20.0):
+    """
+    Pedestrians are unsafe if they ever come within d_zone of a vehicle.
 
+    Quantitative robustness (>0 => unsafe exists):
+      > 0 → there exists a time/agent where a pedestrian is too close to a vehicle
+      < 0 → no such encounter (safe)
+      = 0 → neutral (e.g., no predicted entries)
+    """
+    device = full_world.device
+    N, T, _ = full_world.shape
+
+    # 1) STREL signal
+    traj = su.reshape_trajectories(full_world, node_types)  # [1, N, 6, T]
+
+    # 2) Define reach: ped within d_zone of a vehicle
+    #    (leave labels in the operator; atoms just select feature)
+    ped_labels = [0,3,4]
+    veh_labels = [0,4,5]
+
+    ped_atom = Atom(var_index=4, threshold=0.5,  lte=False)   # "moving" ped (speed > 0)
+    veh_atom = Atom(var_index=4, threshold=0.05, lte=True)   # "moving" veh-like
+
+    reach = Reach(
+        left_child=ped_atom,
+        right_child=veh_atom,
+        d1=0.0, d2=d_zone,
+        is_unbounded=False,
+        left_label=ped_labels,
+        right_label=veh_labels,
+        distance_function="Euclid",
+    )
+
+    # 3) Eventually: ∃t where a ped is within d_zone of a vehicle
+    prop = Eventually(reach, right_time_bound=T - 1)
+
+    # 4) Quantitative semantics
+    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]  # shape can be [N, T'] or [N, 1]
+
+    # 5) Align temporal dims if needed (handles T' != T)
+    #    su.align_temporal_dimensions expects vals [N, Tv] and mask [N, Tm, 1]
+    if vals.shape[1] != mask_eval_scene.shape[1]:
+        vals, mask_eval_scene = su.align_temporal_dimensions(vals, mask_eval_scene)
+
+    Tv = vals.shape[1]  # aligned time length (often 1 for Eventually)
+
+    # 6) Build full mask over agents/timesteps, then pick t=0 like your working function
+    full_mask = torch.zeros((N, Tv), dtype=torch.bool, device=device)
+    full_mask[eval_idx_scene] = mask_eval_scene.squeeze(-1).bool()
+
+    vals_t0 = vals[:, 0]        # [N]
+    mask_t0 = full_mask[:, 0]   # [N]
+    selected = vals_t0[mask_t0] # predicted-at-t0 entries only
+
+    # 7) Aggregate (soft max → “there exists unsafe”)
+    if selected.numel() == 0:
+        return torch.tensor(0.0, device=device)
+
+    alpha = 20.0
+    robustness = (1.0 / alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
+    return robustness
 
 
 def evaluate_ped_somewhere_unmask_debug(full_world, node_types, d_zone=20.0):
@@ -674,56 +781,93 @@ def evaluate_safe_lane_keeping(full_world, mask_eval, eval_mask, node_types,
 
     return robustness
 
-def evaluate_accel_surrounded(full_world, node_types,
-                              a_ego=1.0, a_neigh=0.5, d_zone=15.0):
+def evaluate_accel_surrounded_mask(
+    full_world,
+    mask_eval_scene,
+    eval_idx_scene,
+    node_types,
+    a_ego=0.1,
+    a_neigh=0,
+    d_zone=15.0,
+):
     """
-    STREL property:
-      Eventually_[0,5] ( ego accelerates ∧ surrounded by braking vehicles )
+    Property: A vehicle accelerates while surrounded by braking vehicles.
+    Positive robustness → unsafe (ego violates local flow).
+    Negative robustness → safe.
 
-    Positive robustness → unsafe scenario (ego violates traffic flow).
-    Negative robustness → safe/consistent flow.
+    STREL semantics:
+        Eventually_[0,5] ( ego_accel ∧ Surround( braking_neighbors ) )
+
+    Masked version consistent with evaluate_ped_somewhere_unsafe_mask.
     """
+
     device = full_world.device
-    traj = su.reshape_trajectories(full_world, node_types)  # [1,N,F,T]
+    N, T, _ = full_world.shape
+
+    # 1) STREL signal tensor
+    traj = su.reshape_trajectories(full_world, node_types)  # [1, N, F, T]
     _, N, _, T = traj.shape
 
-    # === 1. Velocity magnitude and acceleration ===
-    vx, vy = traj[0,:,2,:], traj[0,:,3,:]
+    # === Compute velocity magnitude and acceleration ===
+    vx, vy = traj[0, :, 2, :], traj[0, :, 3, :]
     vmag = torch.sqrt(vx**2 + vy**2 + 1e-8)
     a_mag = torch.diff(vmag, dim=1, prepend=vmag[:, :1])  # Δv per step
+    print('acc mean', a_mag.mean()) 
+    print('acc std', a_mag.std()) 
+    print('acc max', a_mag.max()) 
+    print('acc min', a_mag.min())
 
-    # === 2. Build signal tensor ===
+    # 2) Build signal tensor for atoms
     traj_sig = torch.zeros((1, N, 3, T), device=device)
-    traj_sig[0,:,0,:] = a_mag.clamp(-10.0, 10.0)
-    traj_sig[0,:,1,:] = vmag
-    traj_sig[0,:,2,:] = node_types.unsqueeze(1).repeat(1, T)
+    traj_sig[0, :, 0, :] = a_mag       # acceleration
+    traj_sig[0, :, 1, :] = vmag        # velocity magnitude
+    traj_sig[0, :, 2, :] = node_types.unsqueeze(1).repeat(1, T)
 
-    # === 3. Define atoms ===
-    ego_accel = Atom(var_index=0, threshold=a_ego,  lte=False, labels=[Agent.VEHICLE, Agent.MOTORCYCLIST, Agent.BUS])   # ego accelerates
-    neigh_brake = Atom(var_index=0, threshold=-a_neigh, lte=True, labels=[Agent.VEHICLE, Agent.MOTORCYCLIST, Agent.BUS])  # others decelerate
+    # 3) Define atomic predicates
+    ego_accel   = Atom(var_index=0, threshold=a_ego,  lte=False)   # accelerating
+    neigh_brake = Atom(var_index=0, threshold=-a_neigh, lte=True)  # braking
 
-    # === 4. Surround condition: ego is surrounded by braking vehicles ===
+    # 4) Surround condition: ego is surrounded by braking vehicles
     surround_braking = Surround(
         left_child=ego_accel,
         right_child=neigh_brake,
         d2=d_zone,
         distance_function="Euclid",
-        left_labels=[Agent.VEHICLE, Agent.MOTORCYCLIST, Agent.BUS],
-        right_labels=[Agent.VEHICLE, Agent.MOTORCYCLIST, Agent.BUS],
-        all_labels=[0,1,2,3,4,5,6,7,8,9]  # include all agent types in distance field
+        left_labels=[0, 2, 4],  # vehicles-like
+        right_labels=[0, 2, 4],
+        all_labels=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
     )
 
-    # === 5. Unsafe event: ego accelerates AND is surrounded by braking vehicles ===
-    unsafe_event = And(ego_accel, surround_braking)
+    # 5) Unsafe condition: accelerates while surrounded by braking
+    #unsafe_event = And(ego_accel, surround_braking)
+    unsafe_event = surround_braking
+    # 6) Temporal operator: eventually within a short horizon
+    prop = Eventually(unsafe_event, right_time_bound=min(5, T - 1))
 
-    # === 6. Temporal envelope: eventually within a few seconds ===
-    prop = Eventually(unsafe_event, right_time_bound=min(5, T-1))
+    # 7) Quantitative semantics
+    vals = prop.quantitative(traj_sig, normalize=True).squeeze(2)[0]  # [N, T’]
 
-    # === 7. Quantitative evaluation ===
-    vals = prop.quantitative(traj_sig, normalize=True).squeeze(2)[0]  # [N,T]
-    robustness = vals.max()  # unsafe → positive robustness
+    # 8) Align temporal dimensions with mask
+    if vals.shape[1] != mask_eval_scene.shape[1]:
+        vals, mask_eval_scene = su.align_temporal_dimensions(vals, mask_eval_scene)
 
+    Tv = vals.shape[1]
+    full_mask = torch.zeros((N, Tv), dtype=torch.bool, device=device)
+    full_mask[eval_idx_scene] = mask_eval_scene.squeeze(-1).bool()
+
+    # Select only predicted agents at t=0 (consistent convention)
+    vals_t0 = vals[:, 0]
+    mask_t0 = full_mask[:, 0]
+    selected = vals_t0[mask_t0]
+
+    if selected.numel() == 0:
+        return torch.tensor(0.0, device=device)
+
+    # 9) Soft-max aggregation (“there exists unsafe behavior”)
+    alpha = 20.0
+    robustness = (1.0 / alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
     return robustness
+
 
 
 ######################################################
@@ -813,11 +957,11 @@ def evaluate_heading_stability_real(
     traj_sig[0, :, 0, :] = dtheta_abs
     traj_sig[0, :, 1, :] = dtheta_sum_signal
     traj_sig[0, :, 2, :] = traj[0, :, 5, :]  # reuse the node type info
-    #print('mean heading abs', dtheta_abs.mean())
-    #print('max dtheta abs', dtheta_abs.max())
+    print('mean heading abs', dtheta_abs.mean())
+    print('max dtheta abs', dtheta_abs.max())
     # === 4. Define atomic predicates ===
-    local_atom  = Atom(var_index=0, threshold=theta_max_local,  lte=True, labels=[])  # per-step smoothness
-    global_atom = Atom(var_index=1, threshold=theta_max_global, lte=True, labels=[])  # total smoothness
+    local_atom  = Atom(var_index=0, threshold=theta_max_local,  lte=True,)  # per-step smoothness
+    global_atom = Atom(var_index=1, threshold=theta_max_global, lte=True,)  # total smoothness
 
     # === 5. Conjunction and temporal scope ===
     
@@ -826,9 +970,9 @@ def evaluate_heading_stability_real(
     # === 6. Quantitative semantics ===
     vals = prop.quantitative(traj_sig, normalize=True).squeeze(2)[0]  # [N,T]
 
-    #print('maximum vals', vals.max())
+    print('maximum vals', vals.max())
 
-    #print('minimum vals', vals.min())
+    print('minimum vals', vals.min())
 
     
     selected = vals
@@ -837,9 +981,9 @@ def evaluate_heading_stability_real(
         return torch.tensor(0.0, device=device)
 
     # === 8. Smooth min aggregation (STREL semantics) ===
-    alpha = 20.0  
-    #robustness = -(1.0 / alpha) * torch.logsumexp(-alpha * selected.reshape(-1), dim=0)
-    robustness = torch.sum(selected)
+    alpha = 10.0  
+    robustness = -(1.0 / alpha) * torch.logsumexp(-alpha * selected.reshape(-1), dim=0)
+    
     return robustness
 
 def evaluate_heading_stability_full(
@@ -911,4 +1055,95 @@ def evaluate_heading_stability_full(
     return robustness
 
 
-#aggiungi proprietà di accelerazione surrounded da decelerazione
+def evaluate_unsafe_lanechange_mask(
+    full_world,
+    mask_eval_scene,
+    eval_idx_scene,
+    node_types,
+    theta_turn=0.3,   # threshold for abrupt heading change [rad]
+    v_lat=0.8,        # lateral velocity threshold [m/s]
+    d_prox=10.0       # proximity (Euclidean) threshold [m]
+):
+    """
+    Property: A vehicle is unsafe if it either
+        (a) makes an abrupt heading change (|Δθ| > theta_turn), OR
+        (b) changes lane strongly (|vy| > v_lat) while near another vehicle (within d_prox).
+
+    Quantitative robustness (>0 → unsafe):
+        > 0 → unsafe behavior exists
+        < 0 → safe (no such events)
+        = 0 → neutral (no predicted entries)
+    """
+
+    device = full_world.device
+    N, T, _ = full_world.shape
+
+    # 1) Build STREL signal
+    traj = su.reshape_trajectories(full_world, node_types)  # [1, N, 6, T]
+
+    # === Compute heading and angular velocity ===
+    vx, vy = traj[0, :, 2, :], traj[0, :, 3, :]
+    print('|vy|', vy.mean())
+    print('vy max', vy.max())
+    heading = torch.atan2(vy, vx + 1e-8)
+    dtheta = torch.diff(heading, dim=1)
+    dtheta = (dtheta + np.pi) % (2 * np.pi) - np.pi
+    dtheta_abs = torch.cat([dtheta, torch.zeros_like(dtheta[:, :1])], dim=1).abs()  # [N,T]
+
+    # 2) Prepare extended trajectory with derived variables
+    traj_sig = torch.zeros((1, N, 7, T), device=device)
+    traj_sig[0, :, 0:6, :] = traj[0, :, 0:6, :]
+    traj_sig[0, :, 6, :] = dtheta_abs  # add as new variable
+
+    # 3) Define atomic predicates
+    # var_index=6 → |Δθ|, var_index=3 → vy, var_index=4 → |v|
+    sharp_turn_atom   = Atom(var_index=6, threshold=theta_turn, lte=False, labels=[0])  # abrupt heading
+    veh_atom          = Atom(var_index=4, threshold=0.01, lte=False)        # any moving vehicle
+    lateral_move_atom = Atom(var_index=3, threshold=v_lat, lte=False)       # lateral velocity > v_lat
+    # 4) Spatial proximity: vehicle near another vehicle (Euclidean)
+    reach_near = Reach(
+        left_child=veh_atom,
+        right_child=lateral_move_atom,
+        d1=0.0, d2=d_prox,
+        distance_function="Euclid",
+        left_label=[0],
+        right_label=[0]
+    )
+
+    sharp_turn_somewhere = Somewhere(
+    child=sharp_turn_atom,
+    d2=d_prox,
+    distance_function="Euclid",
+    labels=[0],
+    )
+    unsafe_any = And(sharp_turn_atom, reach_near)
+
+    # 5) Unsafe = sharp turn OR (lane change near another vehicle)
+    
+
+    # 6) Eventually (unsafe event occurs somewhere)
+    prop = Eventually(unsafe_any, right_time_bound=T - 1)
+
+    # 7) Quantitative semantics
+    vals = prop.quantitative(traj_sig, normalize=True).squeeze(2)[0]  # [N, T’]
+
+    # 8) Align temporal dims if needed
+    if vals.shape[1] != mask_eval_scene.shape[1]:
+        vals, mask_eval_scene = su.align_temporal_dimensions(vals, mask_eval_scene)
+    Tv = vals.shape[1]
+
+    # 9) Build full mask: predicted entries only
+    full_mask = torch.zeros((N, Tv), dtype=torch.bool, device=device)
+    full_mask[eval_idx_scene] = mask_eval_scene.squeeze(-1).bool()
+
+    vals_t0 = vals[:, 0]
+    mask_t0 = full_mask[:, 0]
+    selected = vals_t0[mask_t0]
+
+    # 10) Aggregate over selected entries
+    if selected.numel() == 0:
+        return torch.tensor(0.0, device=device)
+
+    alpha = 20.0
+    robustness = (1.0 / alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
+    return robustness
