@@ -17,7 +17,7 @@ from enum import Enum
 import copy
 import time
 import utils.safety_metrics as saf
-
+import pickle
 
 class Agent(Enum):
     VEHICLE = 0
@@ -146,12 +146,10 @@ if __name__ == '__main__':
     # num_agents = 20
     # scen_idx = 10863  #for surround
     # num_agents = 9
-    scen_idx = 10863
-    num_agents = 9
+    scen_idx = 11135
+    num_agents = 24
     num_dim = 10
 
-    
-    
 
     # Turn it back into a HeteroDataBatch object (the only one working)
     graph = test_dataset[scen_idx]
@@ -263,7 +261,7 @@ if __name__ == '__main__':
 
     z_opt = su.grad_ascent_reg(qmodel = gen_model, z0 = x_T, lr=0.1, tol=1e-12, lambda_reg=0.0, max_steps=2)
 
-    z_reg = su.grad_ascent_reg(qmodel = gen_model, z0 = x_T, lr=0.1, tol=1e-12, lambda_reg=0.001, max_steps=7)
+    z_reg = su.grad_ascent_reg(qmodel = gen_model, z0 = x_T, lr=0.1, tol=1e-12, lambda_reg=0.001, max_steps=700)
 
     print("Initial latent point:", x_T)
     print("Optimal latent point:", z_opt)

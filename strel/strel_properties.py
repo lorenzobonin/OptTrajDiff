@@ -571,7 +571,7 @@ def evaluate_fast_reach_slow_mask(
         is_unbounded=False,
         left_label=ped_labels,
         right_label=veh_labels,
-        distance_function="Euclid",
+        distance_function="Front",
     )
 
     # 3) Eventually: ∃t where a ped is within d_zone of a vehicle
@@ -981,9 +981,9 @@ def evaluate_heading_stability_real(
         return torch.tensor(0.0, device=device)
 
     # === 8. Smooth min aggregation (STREL semantics) ===
-    alpha = 10.0  
+    alpha = 20.0  
     robustness = -(1.0 / alpha) * torch.logsumexp(-alpha * selected.reshape(-1), dim=0)
-    
+    #robustness = torch.sum(selected)
     return robustness
 
 def evaluate_heading_stability_full(

@@ -343,7 +343,7 @@ def estimate_heading_thresholds(predicted_traj):
     print('dtheta mean', dtheta_abs.mean())
     print('dtheta std', dtheta_abs.std())
     # === Adaptive thresholds ===
-    theta_max_local  = torch.quantile(dtheta_abs.flatten(), 0.5).item() 
+    theta_max_local  = torch.quantile(dtheta_abs.flatten(), 0.75).item() 
     theta_max_global = torch.quantile(dtheta_abs.sum(dim=1), 0.5).item() 
 
     print(f"[adaptive thresholds] θ_local={theta_max_local:.3f}, θ_global={theta_max_global:.3f}")

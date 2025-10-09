@@ -93,9 +93,9 @@ class GenFromLatent(pl.LightningModule):
             elif self.property_name =="ped_pred":
                 robustness = sp.evaluate_ped_somewhere_unmask_debug(pred_eval_local, self.node_types,d_zone=30)
             elif self.property_name == "ped_unsafe":
-                robustness = sp.evaluate_ped_somewhere_unsafe_mask(full_world, mask_eval, eval_mask, self.node_types, d_zone= 30)
+                robustness = sp.evaluate_ped_somewhere_unsafe_mask(full_world, mask_eval, eval_mask, self.node_types, d_zone= 5)
             elif self.property_name == "fast_slow":
-                robustness = sp.evaluate_fast_reach_slow_mask(full_world, mask_eval, eval_mask, self.node_types, d_zone= 10)
+                robustness = sp.evaluate_fast_reach_slow_mask(full_world, mask_eval, eval_mask, self.node_types, d_zone= 5)
             elif self.property_name == "lane_change":
                 robustness = sp.evaluate_unsafe_lanechange_mask(full_world, mask_eval, eval_mask, self.node_types,theta_turn=self.tmax, v_lat=1.0, d_prox=20)
             
@@ -110,7 +110,7 @@ class GenFromLatent(pl.LightningModule):
 # ============================================================
 
 if __name__ == '__main__':
-    seed_value = 9
+    seed_value = 490
     pl.seed_everything(seed_value, workers=True)
 
     parser = ArgumentParser()
@@ -194,7 +194,13 @@ if __name__ == '__main__':
     #top_num_agents_scenarios = [(19, 1359)]
 
     #for surround
-    top_num_agents_scenarios = [(20, 6323), (25, 7520), (19, 6937)]
+    #top_num_agents_scenarios = [(25, 7520), (19, 6937)]
+
+    #for heading
+    #top_num_agents_scenarios = [(24, 11135)]
+
+    #for reach
+    top_num_agents_scenarios = [(25, 7520)]
 
     num_dim = 10
     save_dir = f"outputs_{args.property}"
