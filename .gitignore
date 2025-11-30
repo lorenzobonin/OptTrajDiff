@@ -14,7 +14,11 @@ reach_unsafe/
 ped_clear/
 ped_pred/
 reach_simp/
+surround_fast/
+ped_unsafe/
+fast_slow/
 outputs_reach/
+outputs_fast_slow/
 outputs_ped_pred/
 outputs_reach_unsafe/
 outputs_reach_simp/
@@ -28,6 +32,8 @@ outputs_ped_yield/
 outputs_reach_adapt/
 outputs_veh_space/
 outputs_ped_clear/
+outputs_ped_unsafe/
+outputs_surround_fast
 /*.out
 /*.err
 /*.sh

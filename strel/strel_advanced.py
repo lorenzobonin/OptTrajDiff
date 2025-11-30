@@ -1080,8 +1080,8 @@ class Surround(Node):
             distance_domain_min=distance_domain_min,
             distance_domain_max=distance_domain_max,
             distance_function=distance_function,
-            left_labels=left_labels,
-            right_labels=self.complementary_labels
+            left_label=left_labels,
+            right_label=self.complementary_labels
         )
         self.neg_reach = Not(self.reach_op)
 
