@@ -57,6 +57,31 @@ def align_temporal_dimensions(vals, mask_eval):
 
 
 
+#check if pre-defined property is meaningful
+def debug_property(qmodel, z0):
+    with torch.no_grad():
+        rob = qmodel(z0)
+        print(f"Initial robustness: {rob.item():.4f}")
+
+        if abs(rob.item()) > 5:   # arbitrary
+            print("⚠ property likely too strict or too easy!")
+            return False
+
+        z1 = z0 + torch.randn_like(z0) * 0.1
+        rob_pert = qmodel(z1)
+        print("Perturbed robustness:", rob_pert.item())
+
+        print("Δrob =", abs(rob_pert.item() - rob.item()))
+        if abs(rob_pert.item() - rob.item()) < 1e-3:
+            print("⚠ robustness NOT sensitive to trajectory → property ineffective!")
+            return False
+
+    print("✔ property seems meaningful!")
+    return True
+
+
+
+
 
 
 def grad_ascent_opt(qmodel, z0, lr=0.01, tol=1e-4, max_steps=300, verbose=True):
@@ -87,12 +112,19 @@ def grad_ascent_opt(qmodel, z0, lr=0.01, tol=1e-4, max_steps=300, verbose=True):
             if verbose:
                 print(f"Stopping at step {step}, grad_inf_norm={grad_inf.item():.2e}")
             break
-
+        if robustness>0:
+            z_save = z_param.detach().clone()
         opt.step()
 
         if verbose and (step + 1) % 50 == 0:
             print(f"Step {step+1}: robustness={robustness.item():.6f}")
 
+    
+    if z_save is not None:
+        
+        if verbose:
+            print("------------- Optimal robustness =", qmodel(z_save).item())
+        return z_save
     if verbose:
         print("------------- Optimal robustness =", robustness.item())
     return z_param.detach()
@@ -146,6 +178,80 @@ def grad_ascent_reg(qmodel, z0, lr=0.01, tol=1e-4, max_steps=300, verbose=True, 
             if verbose:
                 print(f"Stopping at step {step}, grad_inf_norm={grad_inf.item():.2e}")
             break
+        if robustness>0:
+            z_save = z_param.detach().clone()   
+
+
+        opt.step()
+
+        if verbose and (step + 1) % 25 == 0:
+            print(f"Step {step+1}: robustness={robustness.item():.6f}, "
+                  f"log_prior={log_prior.item():.6f}, objective={objective.item():.6f}")
+            try:
+                grad_norm = z_param.grad.norm().item()
+                print(f"|| ∇_z robustness || = {grad_norm:.6f}")
+            except:
+                pass
+    if z_save is not None:
+        
+        if verbose:
+            print("------------- Optimal robustness =", qmodel(z_save).item())
+        return z_save
+    if verbose:
+        print("------------- Optimal robustness =", robustness.item())
+        r2_a, r2_b, delta_logp = latent_loglik_diff(z0, z_param)
+        print(f"Latent ||z||^2: start={r2_a:.3f}, final={r2_b:.3f}, "
+              f"delta_logp={delta_logp:.3f} nats")
+    return z_param.detach()
+
+
+def grad_reg(qmodel, z0, lr=0.01, tol=1e-4, max_steps=300, verbose=True, lambda_reg=0.0):
+    """
+    Gradient ascent in diffusion latent space to maximize robustness,
+    with optional regularization on latent likelihood (Gaussian prior).
+    
+    Args:
+        qmodel: function(z) -> robustness scalar
+        z0: initial latent point (tensor)
+        lr: learning rate
+        tol: gradient stopping tolerance
+        max_steps: max iterations
+        verbose: print debug info
+        lambda_reg: weight for log-prior regularization (>=0 encourages staying near origin)
+    """
+    # Trainable latent point
+    z_param = torch.nn.Parameter(z0.detach().clone())
+    opt = torch.optim.Adam([z_param], lr=lr)
+
+    if verbose:
+        with torch.no_grad():
+            start = qmodel(z_param)
+            if start.numel() > 1:
+                start = start.mean()
+            print("Starting robustness:", start.item())
+
+    for step in range(max_steps):
+        opt.zero_grad()
+
+        robustness = qmodel(z_param)
+        if robustness.numel() > 1:
+            robustness = robustness.mean()
+
+        # Gaussian log-prior term: -0.5 * ||z||^2
+        log_prior = -0.5 * torch.sum(z_param ** 2) / z_param.shape[0]
+
+        # Combined objective
+        objective = lambda_reg * log_prior
+
+        # Negative because we use Adam (minimizer)
+        loss = -objective
+        loss.backward()
+
+        grad_inf = z_param.grad.detach().abs().max()
+        if grad_inf < tol:
+            if verbose:
+                print(f"Stopping at step {step}, grad_inf_norm={grad_inf.item():.2e}")
+            break
 
         opt.step()
 
@@ -159,6 +265,30 @@ def grad_ascent_reg(qmodel, z0, lr=0.01, tol=1e-4, max_steps=300, verbose=True, 
         print(f"Latent ||z||^2: start={r2_a:.3f}, final={r2_b:.3f}, "
               f"delta_logp={delta_logp:.3f} nats")
     return z_param.detach()
+
+
+def reg_samples_individually(qmodel, z0, lr=0.01, tol=1e-4, max_steps=150, lambda_reg=0.0, verbose=False):
+    """
+    z0: [num_agents, num_samples, dim]
+    Optimizes each sample s independently: z[:, s, :].
+    Returns z_opt with same shape.
+    """
+    assert z0.dim() == 3, "expected z0 shape [num_agents, num_samples, dim]"
+    A, S, D = z0.shape
+    z_opt = z0.clone()
+
+    for s in range(S):
+        z_s = z0[:, s:s+1, :].contiguous()              # keep sample axis = 1
+        if qmodel(z_s) < - 1000 or qmodel(z_s) > 1000:  # skip very negative or very large
+            if verbose:
+                print(f"Skipping sample {s} with initial robustness {qmodel(z_s).item():.6f}")
+            continue
+        z_s_opt = grad_reg(
+            qmodel=qmodel, z0=z_s, lr=lr, tol=tol, max_steps=max_steps,
+            lambda_reg=lambda_reg, verbose=verbose
+        )
+        z_opt[:, s:s+1, :] = z_s_opt
+    return z_opt
 
 
 def optimize_samples_individually(qmodel, z0, lr=0.01, tol=1e-4, max_steps=150, lambda_reg=0.0, verbose=False):

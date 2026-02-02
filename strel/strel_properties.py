@@ -1,5 +1,6 @@
 import torch
 from strel.strel_advanced import Atom, Reach,  Globally, Eventually, Somewhere, Surround, Not, And, Or
+from strel.strel_base import ReachBasic
 from strel.strel_advanced import _compute_front_distance_matrix
 import time
 import math
@@ -29,10 +30,6 @@ class Agent(Enum):
     UNKNOWN = 9
 
 
-# functional syntax
-Agent = Enum('Agent', [('VEHICLE', 0),('PEDESTRIAN', 1),('CYCLIST', 2),
-                       ('MOTORCYCLIST', 3),('BUS', 4),('STATIC', 5),('BACKGROUND', 6),
-                       ('CONSTRUCTION', 7),('RIDERLESS_BICYCLE', 8),('UNKNOWN', 9)])
 
 
 
@@ -271,11 +268,114 @@ def evaluate_simple_reach(
         alpha = 20.0
         robustness = (1.0/alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
         robustness = torch.max(selected)
-    #time_end = time.time()
-    #print(f"Eventually-Globally-Reach eval time: {time_end - time_start:.4f}")
+    time_end = time.time()
+    print(f"Eventually-Globally-Reach eval time: {time_end - time_start:.4f}")
     #robustness = torch.sum(selected)
     return robustness
 
+
+
+def evaluate_basic_reach(
+        full_world,
+        mask_eval_scene,
+        eval_idx_scene,
+        node_types,
+        left_label,
+        right_label,
+        threshold_1,
+        threshold_2,
+        d_max=50.0):
+    """
+    Property: 
+    """
+    time_start = time.time()
+    device = full_world.device
+    N, T, _ = full_world.shape
+
+    # Node categories (adapt if you have heterogeneous agents)
+    node_types = node_types
+    traj = su.reshape_trajectories(full_world, node_types)   # [1, N, 6, T]
+
+    # Atoms
+    fast_atom   = Atom(var_index=4, threshold=threshold_1, lte=False, labels=left_label)  # vel > thr1
+    slow_atom   = Atom(var_index=4, threshold=threshold_2, lte=True, labels=right_label)   # vel < thr2
+
+    # Spatial reach with FRONT distance
+    reach = ReachBasic(
+        left_child=fast_atom,
+        right_child=slow_atom,
+        d1=0.0, d2=d_max,
+        is_unbounded=False,
+        left_label=left_label,
+        right_label=right_label,
+        distance_function="Euclid"
+    )
+
+
+    # Quantitative semantics
+    vals = reach.quantitative(traj, normalize=True)  # [B,N,1,T]
+    vals = vals.squeeze(2)[0]                        # [N,T]
+
+    # Masking: only predicted entries
+    # pass only one mask to optimize!!!
+    full_mask = torch.zeros((N, T), dtype=torch.bool, device=device)
+    full_mask[eval_idx_scene] = mask_eval_scene.squeeze(-1).bool()
+
+    selected = vals[full_mask]
+
+    if selected.numel() == 0:
+        return torch.tensor(0.0, device=full_world.device)
+
+    if selected.numel() == 0:
+        robustness = torch.tensor(0.0, device=device)
+    else:
+        #!!! check su valore esatto della robustness
+        alpha = 20.0
+        robustness = (1.0/alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
+        robustness = torch.max(selected)
+    time_end = time.time()
+    print(f"Eventually-Globally-Reach eval time: {time_end - time_start:.4f}")
+    #robustness = torch.sum(selected)
+    return robustness
+
+
+
+def evaluate_eventually_reach(
+    full_world, mask_eval_scene, eval_idx_scene, node_types,
+    left_label, right_label, threshold_1, threshold_2, d_max=50.0
+):
+    device = full_world.device
+    N, T, _ = full_world.shape
+
+    traj = su.reshape_trajectories(full_world, node_types)  # [1,N,6,T]
+
+    fast_atom = Atom(4, threshold_1, lte=False, labels=left_label)
+    slow_atom = Atom(4, threshold_2, lte=True,  labels=right_label)
+
+    reach = Reach(
+        fast_atom, slow_atom, d1=0.0, d2=d_max,
+        distance_function="Euclid",
+        left_label=left_label,
+        right_label=right_label,
+    )
+
+    prop = Eventually(reach, right_time_bound=T-1)
+
+    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]  # [N, T']
+    vals, mask_eval_scene = su.align_temporal_dimensions(vals, mask_eval_scene)
+
+    
+    full_mask = torch.zeros_like(vals)
+    full_mask[eval_idx_scene] = mask_eval_scene.squeeze(-1).float()
+
+    
+    selected = vals * full_mask
+    if selected.abs().sum() == 0:
+        return torch.zeros(1, device=device, requires_grad=True)
+
+    alpha = 20.0
+    robustness = -(1/alpha) * torch.logsumexp(-alpha * selected.reshape(-1), dim=0)
+    return robustness 
 
 
 
@@ -394,40 +494,36 @@ def evaluate_cyclist_yield(full_world, mask_eval, eval_mask, node_types, d_max=1
     return -torch.logsumexp(-alpha * selected.reshape(-1), dim=0) / alpha
 
 
-def evaluate_speeding_surrounded_unsafe_mask(
-        full_world,
-        mask_eval_scene,
-        eval_idx_scene,
-        node_types,
-        v_fast=1.0,        # ego is "fast" if |v| > v_fast  (m/s)
-        v_neigh_max=1.0,   # neighbors are "slow" if |v| ≤ v_neigh_max (m/s)
-        d_sur=8.0          # surrounding radius (m)
-    ):
-    """
-    Unsafe if: ∃ vehicle with |v| > v_fast that is SURROUNDED (within d_sur)
-               by slow vehicles (|v| ≤ v_neigh_max).
-    Returns a positive robustness when such an unsafe situation exists.
 
-    Shapes:
-      full_world:        [N, T, 2]
-      mask_eval_scene:   [N_eval_scene, T, 1]  (bool)
-      eval_idx_scene:    [N_eval_scene]        (long indices into global N)
-      node_types:        [N] (long)
+
+
+def evaluate_speeding_surrounded_unsafe_mask(
+    full_world,
+    mask_eval_scene,
+    eval_idx_scene,
+    node_types,
+    v_fast=2.0,
+    v_neigh_max=1.0,
+    d_sur=5.0,
+    use_temporal_window=True,     
+    only_last_part=False,        
+):
     """
+    Unsafe if: ∃ vehicle with high speed that is SURROUNDED by slow vehicles.
+    Positive robustness ⇒ unsafe.
+    """
+
     device = full_world.device
     N, T, _ = full_world.shape
 
-    # 1) STREL state: [1, N, 6, T] with features [x,y,vx,vy,|v|,type]
+    # 1) STREL signal: [1,N,6,T]
     traj = su.reshape_trajectories(full_world, node_types)
-    print("|v| stats:", traj[0,:,4,:].mean(), traj[0,:,4,:].max())
 
-    # 2) Atoms (put labels in the operator; atoms just pick features)
-    fast_atom   = Atom(var_index=4, threshold=v_fast,    lte=False)  # ego fast
-    slow_atom   = Atom(var_index=4, threshold=v_neigh_max, lte=True) # neighbors slow
+    veh_like = [0, 4]        # VEHICLE + BUS ONLY
 
-    veh_like = [1,2]
+    fast_atom = Atom(var_index=4, threshold=v_fast,    lte=False)  # ego fast
+    slow_atom = Atom(var_index=4, threshold=v_neigh_max, lte=True) # neighbors slow
 
-    # 3) SURROUND: ego-fast location is surrounded by slow vehicles within d_sur
     surround_slow = Surround(
         left_child=fast_atom,
         right_child=slow_atom,
@@ -435,37 +531,208 @@ def evaluate_speeding_surrounded_unsafe_mask(
         distance_function="Euclid",
         left_labels=veh_like,
         right_labels=veh_like,
-        all_labels=[0,1,2,3,4,5,6,7,8,9]
+        all_labels=list(range(10)),      # safe: even if no labels match
     )
 
-    # 4) “Exists sometime” → unsafe if this happens at any time
     prop = Eventually(surround_slow, right_time_bound=T-1)
 
-    # 5) Quantitative semantics (STREL)
-    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]  # [N, Tv] (Tv may be 1)
+    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]   # [N,T]
+    vals, mask_eval_scene = su.align_temporal_dimensions(vals, mask_eval_scene)
+    full_mask = torch.zeros_like(vals)     # [N, T]
+    full_mask[eval_idx_scene] = mask_eval_scene.squeeze(-1).float()
 
-    # 6) Align Tv with the mask's T if STREL collapsed/changed time length
-    if vals.shape[1] != mask_eval_scene.shape[1]:
-        vals, mask_eval_scene = su.align_temporal_dimensions(vals, mask_eval_scene)
+    if only_last_part:
+        last_T = vals.shape[1] // 3  # last 1/3 of horizon
+        full_mask[:,:-last_T] = 0.0
 
-    Tv = vals.shape[1]
+    if not use_temporal_window:
+        selected = vals[:, 0] * full_mask[:, 0]   # as before (t=0 only)
+    else:
+        selected = vals * full_mask               # FULL temporal horizon
 
-    # 7) Build full mask over agents/timesteps and evaluate at t=0
-    #    (same pattern as your working evaluate_eg_reach_mask)
-    full_mask = torch.zeros((N, Tv), dtype=torch.bool, device=device)
-    full_mask[eval_idx_scene] = mask_eval_scene.squeeze(-1).bool()
+    if selected.abs().sum() == 0:
+        return torch.zeros(1, device=device, requires_grad=True)
 
-    vals_t0 = vals[:, 0]        # [N]
-    mask_t0 = full_mask[:, 0]   # [N]
-    selected = vals_t0[mask_t0] # predicted entries at t=0 only
+    alpha = 20.0
+    robustness = (1.0 / alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
+    return robustness
 
-    # 8) Aggregate with soft-max → positive if ∃ unsafe instance
-    if selected.numel() == 0:
-        return torch.tensor(0.0, device=device)
+
+
+
+
+
+
+def evaluate_ped_reach_mask(
+    full_world, mask_eval_scene, eval_idx_scene, node_types, d_zone=20.0
+):
+    device = full_world.device
+    N, T, _ = full_world.shape
+
+    traj = su.reshape_trajectories(full_world, node_types)  # [1,N,6,T]
+
+    ped_labels = [1,2]
+    veh_labels = [0,3,4]
+
+    ped_atom = Atom(4, threshold=0.01, lte=False)
+
+    veh_atom = Atom(4, threshold=1.0, lte=False)
+
+    reach = Reach(
+        veh_atom, ped_atom, d1=0.03, d2=d_zone,
+        distance_function="Euclid",
+        left_label=veh_labels,
+        right_label=ped_labels,
+    )
+    
+
+    prop = Eventually(reach, unbound=True)
+
+    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]
+    vals, mask_eval_scene = su.align_temporal_dimensions(vals, mask_eval_scene)
+
+    full_mask = torch.zeros_like(vals)               
+    full_mask[eval_idx_scene] = mask_eval_scene.squeeze(-1).float()
+
+    selected = vals * full_mask                        
+    if selected.abs().sum() == 0:
+        return torch.zeros(1, device=device, requires_grad=True)
 
     alpha = 20.0
     robustness = (1.0/alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
+    return robustness 
+
+
+
+
+
+#######################################################
+# MASKED PROPERTIES
+########################################################
+
+
+def evaluate_ped_somewhere_unmask(full_world, node_types, d_zone=20.0):
+    traj = su.reshape_trajectories(full_world, node_types)
+    print("Unique types:", torch.unique(node_types))
+    #print("Positions range:", traj[0,:,0:2,:].min(), traj[0,:,0:2,:].max())
+    #print("|v| stats:", traj[0,:,4,:].mean(), traj[0,:,4,:].max())
+    N, T, _ = full_world.shape
+    ped_labels = [1,2]
+    veh_labels = [0,3,4]
+
+    print('ped labels', ped_labels)
+    print('veh_labels', veh_labels)
+
+    ped_atom = And(Atom(4, threshold=0.01, lte=False), Atom(4, threshold=2, lte=True))
+
+    veh_atom = And(Atom(4, threshold=4.6, lte=False), Atom(4, threshold=6, lte=True))
+
+
+    reach = Reach(
+        left_child=veh_atom,
+        right_child=ped_atom,
+        d1=0.01, d2=d_zone,
+        distance_function="Euclid",
+        left_label=veh_labels,
+        right_label=ped_labels
+    )
+
+    
+    prop = Eventually(reach, unbound=True)
+    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]
+    print(f"vals min: {vals.min()} max: {vals.max()}")
+    return (1.0/20.0)*torch.logsumexp(20.0*vals.reshape(-1), dim=0)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def evaluate_ped_reach_eg_mask(
+    full_world, mask_eval_scene, eval_idx_scene,
+    node_types, d_zone=20.0, glob_window=8
+):
+    device = full_world.device
+    N, T_original, _ = full_world.shape
+
+    traj = su.reshape_trajectories(full_world, node_types)  # [1, N, 6, T]
+
+    # -------------------------------------------------
+    # 1) Atomic predicates (unsafe ped-veh interaction)
+    # -------------------------------------------------
+    ped_atom = Atom(4, 0.01, lte=False)  # moving pedestrian
+    
+    veh_atom = Atom(4, 2.0, lte=False)  # fast vehicle
+
+    ped_labels = [1, 2]
+    veh_labels = [0, 3, 4]
+
+    reach = Reach(
+        ped_atom, veh_atom,
+        d1=0.0, d2=d_zone,
+        left_label=ped_labels,
+        right_label=veh_labels,
+        distance_function="Euclid",
+    )
+
+    # -------------------------------------------------
+    # 2) Nested: Eventually(Globally(reach))
+    #    - unsafe event must persist ≥ glob_window steps
+    # -------------------------------------------------
+    # Globally: property must hold for ≥glob_window timesteps
+    glob = Globally(
+        reach,
+        left_time_bound=0,
+        right_time_bound=glob_window - 1  # STREL adds +1 internally
+    )
+
+    # Eventually: such persistent interaction must occur *somewhere*
+    prop = Eventually(
+        glob,
+        left_time_bound=0,
+        right_time_bound=max(0, T_original - glob_window)  # SAFE!
+    )
+
+    # -------------------------------------------------
+    # 3) Quantitative semantics
+    # -------------------------------------------------
+    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]  # [N, Tv]
+    vals, mask_eval_scene = su.align_temporal_dimensions(vals, mask_eval_scene)
+
+    # Mask only predicted agents
+    full_mask = torch.zeros_like(vals)
+    full_mask[eval_idx_scene] = mask_eval_scene.squeeze(-1).float()
+
+    selected = vals * full_mask
+
+    if selected.abs().sum() == 0:
+        # UNSAFE → robustness = 0 (neutral)
+        return torch.zeros(1, device=device, requires_grad=True)
+
+    alpha = 20.0
+    robustness = (1.0 / alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
     return robustness
+
+
 
 
 
@@ -536,6 +803,7 @@ def evaluate_ped_somewhere_unsafe_mask(
     robustness = (1.0 / alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
     return robustness
 
+
 def evaluate_fast_reach_slow_mask(
         full_world,
         mask_eval_scene,
@@ -604,31 +872,7 @@ def evaluate_fast_reach_slow_mask(
     return robustness
 
 
-def evaluate_ped_somewhere_unmask_debug(full_world, node_types, d_zone=20.0):
-    traj = su.reshape_trajectories(full_world, node_types)
-    print("Unique types:", torch.unique(node_types))
-    print("Positions range:", traj[0,:,0:2,:].min(), traj[0,:,0:2,:].max())
-    print("|v| stats:", traj[0,:,4,:].mean(), traj[0,:,4,:].max())
 
-    ped_labels = [1,2]
-    veh_labels = [0,2,3]
-
-    print('ped labels', ped_labels)
-    print('veh_labels', veh_labels)
-
-    # !!! cambia mettendo label solo nella formula
-    reach = Reach(
-        left_child=Atom(4, 0.0, lte=False),
-        right_child=Atom(4, 0.01, lte=False),
-        d1=0.0, d2=d_zone,
-        distance_function="Euclid",
-        left_label=ped_labels,
-        right_label=veh_labels
-    )
-    prop = Eventually(reach, right_time_bound=full_world.shape[1]-1)
-    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]
-    print("vals min/max:", vals.min(), vals.max())
-    return (1.0/20.0)*torch.logsumexp(20.0*vals.reshape(-1), dim=0)
 
 
 
@@ -1147,3 +1391,113 @@ def evaluate_unsafe_lanechange_mask(
     alpha = 20.0
     robustness = (1.0 / alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
     return robustness
+
+
+
+def meaningful_reach(full_world, mask_eval, eval_idx, node_types):
+    traj = su.reshape_trajectories(full_world, node_types)  # [1,N,6,T]
+
+    veh_labels = [0, 4]
+    ped_labels = [1, 2]
+
+    ped_zone = Atom(4, 0.0, lte=False, labels=ped_labels)
+    slow_veh = Atom(4, 1.0, lte=True,  labels=veh_labels)
+
+    reach = Reach(
+        left_child=slow_veh,
+        right_child=ped_zone,
+        d1=0.0, d2=12.0,
+        left_label=veh_labels,
+        right_label=ped_labels,
+        distance_function="Euclid"
+    )
+
+    prop = Eventually(reach, right_time_bound=traj.shape[-1] - 1)
+    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]  # [N, T’]
+
+    # ⚠ KEY FIX: USE FLOAT MASK – NOT BOOL!
+    vals, mask_eval = su.align_temporal_dimensions(vals, mask_eval)   # vals [N,T’], mask_eval [N_pred,T’,1]
+    full_mask = torch.zeros_like(vals)                                # float, keeps gradient path safe
+    full_mask[eval_idx] = mask_eval.squeeze(-1).float()               # use float!
+
+    # final selection MUST use multiplication, not indexing!
+    selected = vals * full_mask                                       # <–– differentiable
+    if selected.abs().sum() == 0:                                     # safe check
+        return torch.zeros(1, device=full_world.device, requires_grad=True)
+
+    alpha = 20.0
+    robustness = -(1/alpha) * torch.logsumexp(-alpha * selected.reshape(-1), dim=0)
+    return robustness  # <- this is a TENSOR with gradient attached!
+
+
+
+
+
+
+
+
+
+################################################
+#DEBUGGING PROPERTIES
+################################################
+
+def evaluate_min_vehicle_speed(full_world, node_types, selected_labels=[0], alpha=20.0):
+    """
+    Debugging objective:
+    - Build trajectories using reshape_trajectories
+    - Select agents with types in selected_labels
+    - Extract their speeds |v|
+    - Return logsumexp(-|v|) so that LOWER speed → HIGHER objective
+    """
+
+    # ---- 1. Build trajectory tensor exactly like STREL expects ----
+    traj = su.reshape_trajectories(full_world, node_types)  # [1, N, 6, T]
+
+    device = traj.device
+    _, N, _, T = traj.shape
+
+
+    speeds = traj[0, :, 4, :]     # [N, T]
+    labels = traj[0, :, 5, 0]     # [N]  (node type is constant over time)
+
+    # ---- 2. Build mask for selected agent types ----
+    mask = torch.zeros(N, dtype=torch.bool, device=device)
+    for lab in selected_labels:
+        mask |= (labels == float(lab))  # stored as float
+
+    if mask.sum() == 0:
+        print("[WARNING] No agents match selected_labels", selected_labels)
+        return torch.tensor(0.0, device=device, requires_grad=True)
+
+    # ---- 3. Select only chosen agents ----
+    speeds_selected = speeds[mask]      # [N_sel, T]
+
+    # Flatten into [N_sel*T]
+    speeds_flat = speeds_selected.reshape(-1)
+
+    # ---- 4. Objective: encourage slower vehicles
+    # logsumexp(-|v|) creates strong gradients & is smooth
+    objective = (1/alpha) * torch.logsumexp(-alpha * speeds_flat, dim=0)
+
+    return objective
+
+
+def test_grad_minimize_movement_with_reshape(full_world, node_types):
+    """
+    Same idea as above, but uses your reshape_trajectories() function.
+    This tests the full preprocessing pipeline.
+    """
+
+    traj = su.reshape_trajectories(full_world, node_types)
+    # traj shape: [1,N,6,T]
+    pos = traj[0, :, 0:2, :]  # [N,2,T]
+
+    disp = pos[:, :, 1:] - pos[:, :, :-1]  # [N,2,T-1]
+    movement_cost = (disp ** 2).sum()
+
+    movement_cost
+
+
+    print("Movement cost:", movement_cost.item())
+
+    return -movement_cost

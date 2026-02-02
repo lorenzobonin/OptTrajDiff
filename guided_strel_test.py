@@ -228,7 +228,12 @@ if __name__ == '__main__':
             elif self.property_name == "reach_simp":
                 robustness = sp.evaluate_simple_reach(
                     full_world, mask_eval, eval_mask, self.node_types,
-                    left_label=[0,1,2,3,4], right_label=[0,1,2,3,4], threshold_1=1.3, threshold_2=1.0, d_max=20
+                    left_label=None, right_label=None, threshold_1=1.3, threshold_2=1.0, d_max=20
+                )
+            elif self.property_name == "reach_basic":
+                robustness = sp.evaluate_basic_reach(
+                    full_world, mask_eval, eval_mask, self.node_types,
+                    left_label=None, right_label=None, threshold_1=1.3, threshold_2=1.0, d_max=20
                 )
             elif self.property_name == "surround_accel":
                 robustness = sp.evaluate_accel_surrounded_mask(full_world, mask_eval, eval_mask, self.node_types)
@@ -251,10 +256,17 @@ if __name__ == '__main__':
     
     gen_model = GenFromLatent(model, scen_idx, node_types, property_name=args.property, tmax = tmax, tglob = tglob)
     gen_model.eval()
+
+    gen_model_base = GenFromLatent(model, scen_idx, node_types, property_name='reach_basic', tmax = tmax, tglob = tglob)
+    gen_model_base.eval()
     #pred = model.latent_generator(x_T, i, plot=True)
     z_param = torch.nn.Parameter(x_T.clone())
     robust = gen_model(z_param)
+
+    robust_base = gen_model_base(z_param)
     print("robust.requires_grad:", robust.requires_grad)  # should be True
+
+
 
     g = torch.autograd.grad(robust, z_param, retain_graph=True, allow_unused=True)[0]
     print("‖grad‖:", 0.0 if g is None else g.detach().abs().max().item())

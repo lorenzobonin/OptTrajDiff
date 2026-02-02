@@ -21,25 +21,6 @@ import utils.safety_metrics as saf
 
 
 
-class Agent(Enum):
-    VEHICLE = 0
-    PEDESTRIAN = 1
-    CYCLIST = 2
-    MOTORCYCLIST = 3
-    BUS = 4
-    STATIC = 5
-    BACKGROUND = 6
-    CONSTRUCTION = 7
-    RIDERLESS_BICYCLE = 8
-    UNKNOWN = 9
-
-
-# functional syntax
-Agent = Enum('Agent', [('VEHICLE', 0),('PEDESTRIAN', 1),('CYCLIST', 2),
-                       ('MOTORCYCLIST', 3),('BUS', 4),('STATIC', 5),('BACKGROUND', 6),
-                       ('CONSTRUCTION', 7),('RIDERLESS_BICYCLE', 8),('UNKNOWN', 9)])
-
-
 # ============================================================
 # --- Generator wrapper for property evaluation
 # ============================================================
@@ -77,9 +58,9 @@ class GenFromLatent(pl.LightningModule):
                     left_label=None, right_label=None, threshold_1=1.3, threshold_2=1.0, d_max=10
                 )
             elif self.property_name == "pred_reach":
-                robustness = sp.evaluate_eg_reach(
+                robustness = sp.evaluate_eventually_reach(
                     pred_eval_local, mask_eval, eval_mask, self.node_types,
-                    left_label=[0,1,2,3,4], right_label=[0,1,2,3,4], threshold_1=1.3, threshold_2=1.0, d_max=20
+                    left_label=[0,1,2,3,4], right_label=[0,1,2,3,4], threshold_1=1.3, threshold_2=1.0, d_max=10
                 )
             elif self.property_name == "reach_simp":
                 robustness = sp.evaluate_simple_reach(
@@ -88,17 +69,30 @@ class GenFromLatent(pl.LightningModule):
                 )
             elif self.property_name == "surround_accel":
                 robustness = sp.evaluate_accel_surrounded_mask(full_world, mask_eval, eval_mask, self.node_types)
+
+            elif self.property_name == "mean_reach":
+                robustness = sp.meaningful_reach(full_world, mask_eval, eval_mask, self.node_types)
+
             elif self.property_name == "surround_fast":
                 robustness = sp.evaluate_speeding_surrounded_unsafe_mask(full_world, mask_eval, eval_mask, self.node_types)
+
             elif self.property_name =="ped_pred":
-                robustness = sp.evaluate_ped_somewhere_unmask_debug(pred_eval_local, self.node_types,d_zone=30)
+                robustness = sp.evaluate_ped_somewhere_unmask(pred_eval_local, self.node_types,d_zone=3)
+
+            elif self.property_name =="ped_eg":
+                robustness = sp.evaluate_ped_reach_eg_mask(full_world, mask_eval, eval_mask, self.node_types, d_zone=1.5)
+
             elif self.property_name == "ped_unsafe":
-                robustness = sp.evaluate_ped_somewhere_unsafe_mask(full_world, mask_eval, eval_mask, self.node_types, d_zone= 5)
+                robustness = sp.evaluate_ped_reach_mask(full_world, mask_eval, eval_mask, self.node_types, d_zone= 20.0)
+
             elif self.property_name == "fast_slow":
                 robustness = sp.evaluate_fast_reach_slow_mask(full_world, mask_eval, eval_mask, self.node_types, d_zone= 5)
+
             elif self.property_name == "lane_change":
                 robustness = sp.evaluate_unsafe_lanechange_mask(full_world, mask_eval, eval_mask, self.node_types,theta_turn=self.tmax, v_lat=1.0, d_prox=20)
-            
+
+            elif self.property_name == "min_vel":
+                robustness = sp.test_grad_minimize_movement_with_reshape(pred_eval_local, self.node_types)
             else:
                 raise ValueError(f"Unknown property type '{self.property_name}'")
 
@@ -110,7 +104,7 @@ class GenFromLatent(pl.LightningModule):
 # ============================================================
 
 if __name__ == '__main__':
-    seed_value = 490
+    seed_value = 80085
     pl.seed_everything(seed_value, workers=True)
 
     parser = ArgumentParser()
@@ -149,9 +143,11 @@ if __name__ == '__main__':
     parser.add_argument('--cost_param_threl', type = float, default = 1.0)
     # === Optimization-specific arguments ===
     parser.add_argument('--property', type=str, default='reach_uns',
-                        choices=['reach_uns', 'head_real', 'ped_unsafe', 'reach_simp', 'pred_reach', 'ped_pred', 'surround_fast','surround_accel', 'lane_change', 'fast_slow'])
+                        choices=['reach_uns', 'head_real', 'ped_unsafe', 'reach_simp', 'pred_reach', 'ped_pred', 
+                                 'surround_fast', 'ped_eg',
+                                 'surround_accel', 'lane_change', 'fast_slow', 'mean_reach', 'min_vel'])
     
-    parser.add_argument('--num_samples', type=int, default=20)
+    parser.add_argument('--num_samples', type=int, default=10)
     parser.add_argument('--lambda_reg', type=float, default=0.001)
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--tol', type=float, default=1e-8)
@@ -191,21 +187,25 @@ if __name__ == '__main__':
     #     (19, 1359), (19, 6937)
     # ]
     #for ped unsafe
-    #top_num_agents_scenarios = [(19, 1359)]
+    top_num_agents_scenarios = [(19, 1359)]
 
     #for surround
-    #top_num_agents_scenarios = [(25, 7520), (19, 6937)]
+    #top_num_agents_scenarios = [(20, 6323), (19, 6937)]
 
     #for heading
     #top_num_agents_scenarios = [(24, 11135)]
 
     #for reach
-    top_num_agents_scenarios = [(25, 7520)]
+    #top_num_agents_scenarios = [(25, 7520)]
 
+    #top_num_agents_scenarios = [(9, 10863)]
+    
     num_dim = 10
-    save_dir = f"outputs_{args.property}"
+    out_dir = f"outputs_{args.property}"
+    save_dir = os.path.join('results_opt', out_dir)
     os.makedirs(save_dir, exist_ok=True)
-
+    print('property:', args.property)
+    print('distance front and thresholds applied where needed!')
     # ========================================================
     # Store all results in a dict for reproducibility
     # ========================================================
@@ -251,7 +251,7 @@ if __name__ == '__main__':
         su.summarize_reshaped(loc_reshaped)
 
         tmax, tglob = su.estimate_heading_thresholds(full_world)
-        if args.property == 'head_real' or args.property == 'pred_reach' or args.property== 'ped_pred':
+        if args.property == 'head_real' or args.property == 'pred_reach' or args.property== 'ped_pred' or args.property=='min_vel':
             node_types = pred_types
         else:
             node_types = full_types
@@ -275,16 +275,32 @@ if __name__ == '__main__':
         print(f"Initial avg robustness: {avg_init:.4f}")
         print(f"Initial negatives: {neg_init}/{args.num_samples} ({perc_neg_init:.1f}%)")
 
+
+
+        img_dir = os.path.join(save_dir, 'images')
+        os.makedirs(img_dir, exist_ok=True)
         # --- Vanilla generation ---
         vanilla_traj = model.latent_generator(
             z0, scen_idx, plot=True,
             enable_grads=False, return_pred_only=True,
             exp_id=f"{seed_value}_vanilla_{scen_idx}",
-            img_folder=args.property,
+            img_folder=img_dir,
             sub_folder=f'scen_{scen_idx}'
         )
 
+        #su.debug_property(gen_model, z0)
+
         # --- Optimization ---
+        # z_opt = su.reg_samples_individually(
+        #     qmodel=gen_model,
+        #     z0=z0,
+        #     lr=args.lr,
+        #     tol=args.tol,
+        #     max_steps=args.max_steps,
+        #     lambda_reg=args.lambda_reg,
+        #     verbose=True
+        # )
+
         z_opt = su.optimize_samples_individually(
             qmodel=gen_model,
             z0=z0,
@@ -294,6 +310,7 @@ if __name__ == '__main__':
             lambda_reg=args.lambda_reg,
             verbose=True
         )
+
 
         # --- Evaluate optimized robustness per sample ---
         rob_opt = []
@@ -305,17 +322,18 @@ if __name__ == '__main__':
 
         avg_opt = rob_opt.mean().item()
         neg_opt = (rob_opt < 0).sum().item()
-        perc_neg_opt = 100.0 * neg_opt / args.num_samples
+        perc_neg_opt = 100.0 - 100.0 * neg_opt / args.num_samples
 
         print(f"Optimized avg robustness: {avg_opt:.4f}")
         print(f"Optimized negatives: {neg_opt}/{args.num_samples} ({perc_neg_opt:.1f}%)")
+
 
         # --- Optimized generation ---
         opt_traj = model.latent_generator(
             z_opt, scen_idx, plot=True,
             enable_grads=False, return_pred_only=True,
             exp_id=f"{seed_value}_opt_{scen_idx}",
-            img_folder=args.property,
+            img_folder= img_dir,
             sub_folder=f'scen_{scen_idx}'
         )
 

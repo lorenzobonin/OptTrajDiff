@@ -40,3 +40,7 @@ outputs_surround_fast
 /*.yml
 /*.slurm
 visual/
+/*.png
+/*.txt
+results_old/
+results_opt/
