@@ -19,11 +19,86 @@ from enum import Enum
 import time
 import utils.safety_metrics as saf
 
-
-
 # ============================================================
 # --- Generator wrapper for property evaluation
 # ============================================================
+
+# al momento qui, da spostare in utils, c'è una copia come metodo della classe in guided diffnet, perché???
+def decode_types_from_scenario(num_types):
+        # Mapping from Argoverse numeric types to names
+        ID_TO_TYPE = {
+            0: "VEHICLE",
+            1: "PEDESTRIAN",
+            2: "CYCLIST",
+            3: "MOTORCYCLIST",
+            4: "BUS",
+            5: "STATIC",
+            6: "BACKGROUND",
+            7: "CONSTRUCTION",
+            8: "RIDERLESS_BICYCLE",
+            9: "UNKNOWN",
+        }
+
+        types = [ID_TO_TYPE.get(int(t), "UNKNOWN") for t in num_types]
+
+        # eval_mask = data['agent']['category'] >= 2
+        # types = [t for i, t in enumerate(types) if eval_mask[i]]
+
+        return types
+
+def clean_and_filter_agents(full_world):
+    """
+    full_world: [N, T, 2]
+
+    returns:
+      world_valid: [N_valid, T, 2]   (only valid agents, cleaned)
+      agent_mask:  [N]               (True = kept agent)
+    """
+    N, T, _ = full_world.shape
+    device = full_world.device
+
+    # 1) timestep validity mask
+    valid = (full_world.abs().sum(-1) != 0)  # [N, T]
+
+    # 2) agent-level validity
+    agent_mask = valid.any(dim=1)             # [N]
+
+    # 3) remove fully invalid agents
+    world = full_world[agent_mask]             # [N_valid, T, 2]
+    valid = valid[agent_mask]                  # [N_valid, T]
+
+    # early exit
+    if world.numel() == 0:
+        return world, agent_mask
+
+    Nv = world.shape[0]
+    time = torch.arange(T, device=device)
+
+    # 4) forward fill indices
+    last_valid = torch.where(
+        valid,
+        time.unsqueeze(0),
+        torch.full((Nv, T), -1, device=device)
+    )
+    last_valid = torch.cummax(last_valid, dim=1).values
+
+    # 5) backward fill indices
+    next_valid = torch.where(
+        valid,
+        time.unsqueeze(0),
+        torch.full((Nv, T), T, device=device)
+    )
+    next_valid = torch.cummin(next_valid.flip(1), dim=1).values.flip(1)
+
+    # 6) choose valid index per timestep
+    idx = torch.where(last_valid >= 0, last_valid, next_valid)
+    idx = idx.clamp(0, T - 1)
+
+    # 7) gather filled trajectories
+    idx = idx.unsqueeze(-1).expand(-1, -1, 2)
+    world_valid = torch.gather(world, dim=1, index=idx)
+
+    return world_valid, agent_mask
 
 class GenFromLatent(pl.LightningModule):
         def __init__(self, model, scen_id, types, property_name="reach_uns", tmax=0.2, tglob=3):
@@ -34,10 +109,9 @@ class GenFromLatent(pl.LightningModule):
             self.property_name = property_name
             self.tmax = tmax
             self.tglob = tglob
+            self.valid_types = node_types
 
         def forward(self, z):
-
-
 
             out = self.model.latent_generator(
                 z,
@@ -49,50 +123,69 @@ class GenFromLatent(pl.LightningModule):
             )
             full_world, pred_eval_local, mask_eval, eval_mask = out
 
+            # clean the agents tensor from invalid data
+            full_world, agent_mask = clean_and_filter_agents(full_world)
+            self.valid_types = self.node_types[agent_mask.to(self.node_types.device)]
+
+            #fix also indexing of predicted agents
+            orig_to_new = torch.full(
+                (agent_mask.shape[0],),
+                -1,
+                device=agent_mask.device,
+                dtype=torch.long
+            )
+
+            orig_to_new[agent_mask] = torch.arange(
+                agent_mask.sum(),
+                device=agent_mask.device
+            )
+
+            eval_mask = orig_to_new[eval_mask]
+
             # Choose STREL property
             if self.property_name == "head_real":
-                robustness = sp.evaluate_heading_stability_real(pred_eval_local, self.node_types, self.tmax, self.tglob)
+                robustness = sp.evaluate_heading_stability_real(pred_eval_local, self.valid_types, self.tmax, self.tglob)
             elif self.property_name == "reach_uns":
                 robustness = sp.evaluate_eg_reach_mask(
-                    full_world, mask_eval, eval_mask, self.node_types,
+                    full_world, mask_eval, eval_mask, self.valid_types,
                     left_label=None, right_label=None, threshold_1=1.3, threshold_2=1.0, d_max=10
                 )
             elif self.property_name == "pred_reach":
                 robustness = sp.evaluate_eventually_reach(
-                    pred_eval_local, mask_eval, eval_mask, self.node_types,
+                    pred_eval_local, mask_eval, eval_mask, self.valid_types,
                     left_label=[0,1,2,3,4], right_label=[0,1,2,3,4], threshold_1=1.3, threshold_2=1.0, d_max=10
                 )
             elif self.property_name == "reach_simp":
                 robustness = sp.evaluate_simple_reach(
-                    full_world, mask_eval, eval_mask, self.node_types,
+                    full_world, mask_eval, eval_mask, self.valid_types,
                     left_label=[0,1,2,3,4], right_label=[0,1,2,3,4], threshold_1=1.3, threshold_2=1.0, d_max=20
                 )
             elif self.property_name == "surround_accel":
-                robustness = sp.evaluate_accel_surrounded_mask(full_world, mask_eval, eval_mask, self.node_types)
+                robustness = sp.evaluate_accel_surrounded_mask(full_world, mask_eval, eval_mask, self.valid_types)
 
             elif self.property_name == "mean_reach":
-                robustness = sp.meaningful_reach(full_world, mask_eval, eval_mask, self.node_types)
+                robustness = sp.meaningful_reach(full_world, mask_eval, eval_mask, self.valid_types)
 
             elif self.property_name == "surround_fast":
-                robustness = sp.evaluate_speeding_surrounded_unsafe_mask(full_world, mask_eval, eval_mask, self.node_types)
+                robustness = sp.evaluate_speeding_surrounded_unsafe_mask(full_world, mask_eval, eval_mask, valid_types)
 
             elif self.property_name =="ped_pred":
-                robustness = sp.evaluate_ped_somewhere_unmask(pred_eval_local, self.node_types,d_zone=3)
+                robustness = sp.evaluate_ped_somewhere_unmask(pred_eval_local, self.valid_types,d_zone=3)
 
             elif self.property_name =="ped_eg":
-                robustness = sp.evaluate_ped_reach_eg_mask(full_world, mask_eval, eval_mask, self.node_types, d_zone=1.5)
+                robustness = sp.evaluate_ped_reach_eg_mask(full_world, mask_eval, eval_mask, self.valid_types, d_zone=1.5)
 
             elif self.property_name == "ped_unsafe":
-                robustness = sp.evaluate_ped_reach_mask(full_world, mask_eval, eval_mask, self.node_types, d_zone= 20.0)
+                robustness = sp.evaluate_ped_reach_mask(full_world, mask_eval, eval_mask, self.valid_types, d_zone= 20.0)
 
             elif self.property_name == "fast_slow":
-                robustness = sp.evaluate_fast_reach_slow_mask(full_world, mask_eval, eval_mask, self.node_types, d_zone= 5)
+                robustness = sp.evaluate_fast_reach_slow_mask(full_world, mask_eval, eval_mask, self.valid_types, d_zone= 5)
 
             elif self.property_name == "lane_change":
-                robustness = sp.evaluate_unsafe_lanechange_mask(full_world, mask_eval, eval_mask, self.node_types,theta_turn=self.tmax, v_lat=1.0, d_prox=20)
+                robustness = sp.evaluate_unsafe_lanechange_mask(full_world, mask_eval, eval_mask, self.valid_types,theta_turn=self.tmax, v_lat=1.0, d_prox=20)
 
             elif self.property_name == "min_vel":
-                robustness = sp.test_grad_minimize_movement_with_reshape(pred_eval_local, self.node_types)
+                robustness = sp.test_grad_minimize_movement_with_reshape(pred_eval_local, self.node_types) # da fixare
             else:
                 raise ValueError(f"Unknown property type '{self.property_name}'")
 
@@ -231,6 +324,7 @@ if __name__ == '__main__':
         # Load graph and bind conditioning
         graph = test_dataset[scen_idx]
         graph = Batch.from_data_list([graph])
+
         model.cond_data = graph
         x_T = torch.randn([num_agents, 1, num_dim])
     
@@ -353,6 +447,8 @@ if __name__ == '__main__':
         print(f"Complete optimization of the scenario: {time_end - time_start:.4f}")
         print(f"Finished scenario {scen_idx} ({args.property}) — results saved in {save_dir}/")
 
+        type_list = decode_types_from_scenario(gen_model.valid_types)
+
         try: 
             traj_path_pkl = os.path.join(save_dir, f"{scen_idx}_vanilla_traj_seed{seed_value}.pkl")
             opt_path_pkl = os.path.join(save_dir, f"{scen_idx}_opt_traj_seed{seed_value}.pkl")
@@ -369,23 +465,26 @@ if __name__ == '__main__':
         except:
             print('cannot dump pickles!')
         try:
-            all_types = [0,1,2,3,4,5,6,7,8]
-
-            min_d_van = saf.min_vehicle_related_distance_per_sample(vanilla_traj, all_types)
+            #all_types = [0,1,2,3,4,5,6,7,8]
+            print(vanilla_traj.shape)
+            print(len(type_list))
+            min_d_van = saf.min_vehicle_related_distance_per_sample(vanilla_traj, type_list)
             print('minimum distance for vanilla_traj', min_d_van)
-            min_d_opt = saf.min_vehicle_related_distance_per_sample(opt_traj, all_types)
+            min_d_opt = saf.min_vehicle_related_distance_per_sample(opt_traj, type_list)
             print('minimum distance for vanilla_traj', min_d_opt)
-        except:
-            print('cannot compute distances!')
+        except Exception as e:
+            print(e)
+            #print('cannot compute distances!')
         
         try:
-            all_types = [0,1,2,3,4,5,6,7,8]
-            coll_van = saf.saf.collision_flag_per_sample(vanilla_traj, all_types)
+            #all_types = [0,1,2,3,4,5,6,7,8]
+            coll_van = saf.collision_flag_per_sample(vanilla_traj, type_list)
             print('collisions for vanilla_traj', coll_van)
-            coll_opt = saf.saf.collision_flag_per_sample(opt_traj, all_types)
+            coll_opt = saf.collision_flag_per_sample(opt_traj, type_list)
             print('collisions for vanilla_traj', coll_opt)
-        except:
-            print('cannot compute collisions!')
+        except Exception as e:
+            print(e)
+            #print('cannot compute collisions!')
         try:
             safety_results ={
                 "orig_distance" : min_d_van,
