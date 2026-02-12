@@ -468,7 +468,7 @@ def _plot_actor_tracks_prediction(
                 actor_trajectory[-1, 1],
                 "o",
                 color=track_colors["PEDESTRIAN"],
-                markersize=7,
+                markersize=9,
             )
         else:
             plt.plot(

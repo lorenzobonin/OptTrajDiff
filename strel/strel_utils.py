@@ -11,6 +11,28 @@ from av2.datasets.motion_forecasting.data_schema import (
     TrackCategory,
 )
 
+
+def decode_types_from_num_types(num_types):
+        # Mapping from Argoverse numeric types to names
+        ID_TO_TYPE = {
+            0: "VEHICLE",
+            1: "PEDESTRIAN",
+            2: "CYCLIST",
+            3: "MOTORCYCLIST",
+            4: "BUS",
+            5: "STATIC",
+            6: "BACKGROUND",
+            7: "CONSTRUCTION",
+            8: "RIDERLESS_BICYCLE",
+            9: "UNKNOWN",
+        }
+
+        types = [ID_TO_TYPE.get(int(t), "UNKNOWN") for t in num_types]
+
+
+        return types
+
+
 def reshape_trajectories(pred: torch.Tensor, node_types: torch.Tensor) -> torch.Tensor:
     """
     pred: [N,T,2] positions
@@ -88,6 +110,7 @@ def grad_ascent_opt(qmodel, z0, lr=0.01, tol=1e-4, max_steps=300, verbose=True):
     # Trainable latent point
     z_param = torch.nn.Parameter(z0.detach().clone())
     opt = torch.optim.Adam([z_param], lr=lr)
+    z_save = None
 
     if verbose:
         with torch.no_grad():
@@ -148,6 +171,8 @@ def grad_ascent_reg(qmodel, z0, lr=0.01, tol=1e-4, max_steps=300, verbose=True, 
     # Trainable latent point
     z_param = torch.nn.Parameter(z0.detach().clone())
     opt = torch.optim.Adam([z_param], lr=lr)
+    z_save = None
+    best_rob = float(0.0)
 
     if verbose:
         with torch.no_grad():
@@ -178,8 +203,9 @@ def grad_ascent_reg(qmodel, z0, lr=0.01, tol=1e-4, max_steps=300, verbose=True, 
             if verbose:
                 print(f"Stopping at step {step}, grad_inf_norm={grad_inf.item():.2e}")
             break
-        if robustness>0:
-            z_save = z_param.detach().clone()   
+        if robustness>best_rob:
+            z_save = z_param.detach().clone()  
+            best_rob = robustness.item()
 
 
         opt.step()
@@ -195,6 +221,7 @@ def grad_ascent_reg(qmodel, z0, lr=0.01, tol=1e-4, max_steps=300, verbose=True, 
     if z_save is not None:
         
         if verbose:
+            print("best robustness found during optimization: ", best_rob)
             print("------------- Optimal robustness =", qmodel(z_save).item())
         return z_save
     if verbose:

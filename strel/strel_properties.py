@@ -172,7 +172,7 @@ def evaluate_eg_reach_mask(
     reach = Reach(
         left_child=fast_atom,
         right_child=slow_atom,
-        d1=0.0, d2=d_max,
+        d1=0.01, d2=d_max,
         is_unbounded=False,
         left_label=left_label,
         right_label=right_label,
@@ -558,65 +558,14 @@ def evaluate_speeding_surrounded_unsafe_mask(
     return robustness
 
 
-def clean_and_filter_agents(full_world):
-    """
-    full_world: [N, T, 2]
 
-    returns:
-      world_valid: [N_valid, T, 2]   (only valid agents, cleaned)
-      agent_mask:  [N]               (True = kept agent)
-    """
-    N, T, _ = full_world.shape
-    device = full_world.device
 
-    # 1) timestep validity mask
-    valid = (full_world.abs().sum(-1) != 0)  # [N, T]
 
-    # 2) agent-level validity
-    agent_mask = valid.any(dim=1)             # [N]
-
-    # 3) remove fully invalid agents
-    world = full_world[agent_mask]             # [N_valid, T, 2]
-    valid = valid[agent_mask]                  # [N_valid, T]
-
-    # early exit
-    if world.numel() == 0:
-        return world, agent_mask
-
-    Nv = world.shape[0]
-    time = torch.arange(T, device=device)
-
-    # 4) forward fill indices
-    last_valid = torch.where(
-        valid,
-        time.unsqueeze(0),
-        torch.full((Nv, T), -1, device=device)
-    )
-    last_valid = torch.cummax(last_valid, dim=1).values
-
-    # 5) backward fill indices
-    next_valid = torch.where(
-        valid,
-        time.unsqueeze(0),
-        torch.full((Nv, T), T, device=device)
-    )
-    next_valid = torch.cummin(next_valid.flip(1), dim=1).values.flip(1)
-
-    # 6) choose valid index per timestep
-    idx = torch.where(last_valid >= 0, last_valid, next_valid)
-    idx = idx.clamp(0, T - 1)
-
-    # 7) gather filled trajectories
-    idx = idx.unsqueeze(-1).expand(-1, -1, 2)
-    world_valid = torch.gather(world, dim=1, index=idx)
-
-    return world_valid, agent_mask
 
 
 def evaluate_ped_reach_mask(
     full_world, mask_eval_scene, eval_idx_scene, node_types, d_zone=20.0
 ):
-
     device = full_world.device
     N, T, _ = full_world.shape
 
@@ -625,41 +574,81 @@ def evaluate_ped_reach_mask(
     ped_labels = [1,2]
     veh_labels = [0,3,4]
 
-    ped_atom = Atom(4, threshold=0.01, lte=False)
+    ped_atom = And(Atom(4, threshold=0.01, lte=False), Atom(4, threshold=2, lte=True))
 
-    veh_atom = Atom(4, threshold=1.0, lte=False)
+    veh_atom = And(Atom(4, threshold=4.6, lte=False), Atom(4, threshold=6, lte=True))
+
 
     reach = Reach(
-        veh_atom, ped_atom, d1=0.03, d2=d_zone,
+        left_child=veh_atom,
+        right_child=ped_atom,
+        d1=0.01, d2=d_zone,
         distance_function="Euclid",
         left_label=veh_labels,
-        right_label=ped_labels,
+        right_label=ped_labels
     )
     
 
     prop = Eventually(reach, unbound=True)
 
     vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]
-    vals, mask_eval_scene = su.align_temporal_dimensions(vals, mask_eval_scene)
+    #print(f'vals shape: {vals.shape}, mask shape: {mask_eval_scene.shape}, eval idx shape: {eval_idx_scene.shape}')
+    #vals, mask_eval_scene = su.align_temporal_dimensions(vals, mask_eval_scene) #possibile problema
 
     full_mask = torch.zeros_like(vals)               
     full_mask[eval_idx_scene] = mask_eval_scene.squeeze(-1).float()
 
-    selected = vals * full_mask                        
-    if selected.abs().sum() == 0:
-        return torch.zeros(1, device=device, requires_grad=True)
+    selected = vals * full_mask       
+    print(f"Vals min: {vals.min()} max: {vals.max()}")      
+    print(f"Selected min: {selected.min()} max: {selected.max()}")         
+    
 
     alpha = 20.0
-    robustness = (1.0/alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
-    return robustness 
+    #robustness = (1.0/alpha) * torch.logsumexp(alpha * selected.reshape(-1), dim=0)
+    #return robustness 
+    return (1.0/20.0)*torch.logsumexp(20.0*vals.reshape(-1), dim=0)
 
 
 
 
 
 #######################################################
-# MASKED PROPERTIES
+# UNMASKED PROPERTIES
 ########################################################
+
+
+def evaluate_reach_fast_slow(full_world, node_types, d_zone=20.0):
+    traj = su.reshape_trajectories(full_world, node_types)
+    #print("Unique types:", torch.unique(node_types))
+    #print("Positions range:", traj[0,:,0:2,:].min(), traj[0,:,0:2,:].max())
+    #print("|v| stats:", traj[0,:,4,:].mean(), traj[0,:,4,:].max())
+    N, T, _ = full_world.shape
+    #ped_labels = [1,2]
+    veh_labels = [0,3,4]
+
+    #print('ped labels', ped_labels)
+    #print('veh_labels', veh_labels)
+
+    slow_atom = And(Atom(4, threshold=0.01, lte=False), Atom(4, threshold=0.5, lte=True))
+
+    fast_atom = And(Atom(4, threshold=2.2, lte=False), Atom(4, threshold=10, lte=True))
+
+
+    reach = Reach(
+        left_child=fast_atom,
+        right_child=slow_atom,
+        d1=0.01, d2=d_zone,
+        distance_function="Front",
+        left_label=veh_labels,
+        right_label=veh_labels
+    )
+
+    
+    prop = Eventually(reach, unbound=True)
+    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]
+    print(f"vals min: {vals.min()} max: {vals.max()}")
+    return (1.0/20.0)*torch.logsumexp(20.0*vals.reshape(-1), dim=0)
+
 
 
 def evaluate_ped_somewhere_unmask(full_world, node_types, d_zone=20.0):
@@ -674,7 +663,7 @@ def evaluate_ped_somewhere_unmask(full_world, node_types, d_zone=20.0):
     print('ped labels', ped_labels)
     print('veh_labels', veh_labels)
 
-    ped_atom = And(Atom(4, threshold=0.01, lte=False), Atom(4, threshold=2, lte=True))
+    ped_atom = And(Atom(4, threshold=0.01, lte=False), Atom(4, threshold=0.5, lte=True))
 
     veh_atom = And(Atom(4, threshold=4.6, lte=False), Atom(4, threshold=6, lte=True))
 
@@ -697,7 +686,88 @@ def evaluate_ped_somewhere_unmask(full_world, node_types, d_zone=20.0):
 
 
 
+def evaluate_speeding_surrounded_unmask(
+    full_world,
+    node_types,
+    v_fast=2.0,
+    v_neigh_max=0.3,
+    d_sur=3.0,   
+):
+    """
+    Unsafe if: ∃ vehicle with high speed that is SURROUNDED by slow vehicles.
+    Positive robustness ⇒ unsafe.
+    """
 
+    device = full_world.device
+    N, T, _ = full_world.shape
+
+    # 1) STREL signal: [1,N,6,T]
+    traj = su.reshape_trajectories(full_world, node_types)
+
+    veh_like = [0,3, 4]        # VEHICLE + MOTORBIKE + BUS ONLY
+
+    fast_atom = And(Atom(4, threshold=3, lte=False), Atom(4, threshold=8.0, lte=True))
+    slow_atom = And(Atom(4, threshold=0.1, lte=False), Atom(4, threshold=0.3, lte=True)) # neighbors slow
+
+    surround_slow = Surround(
+        left_child=fast_atom,
+        right_child=slow_atom,
+        d2=d_sur,
+        distance_function="Euclid",
+        left_labels=veh_like,
+        right_labels=veh_like,
+        all_labels=list(range(10)),      
+    )
+
+    prop = Eventually(surround_slow, unbound=True)
+
+    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]   # [N,T]
+    print(f"vals min: {vals.min()} max: {vals.max()}")
+    alpha = 20.0
+    robustness = (1.0 / alpha) * torch.logsumexp(alpha * vals.reshape(-1), dim=0)
+    return robustness
+
+
+def evaluate_slowing_surrounded_unmask(
+    full_world,
+    node_types,
+    v_fast=2.0,
+    v_neigh_max=0.3,
+    d_sur=3.0,   
+):
+    """
+    Unsafe if: ∃ vehicle with high speed that is SURROUNDED by slow vehicles.
+    Positive robustness ⇒ unsafe.
+    """
+
+    device = full_world.device
+    N, T, _ = full_world.shape
+
+    # 1) STREL signal: [1,N,6,T]
+    traj = su.reshape_trajectories(full_world, node_types)
+
+    veh_like = [0,3, 4]        # VEHICLE + MOTORBIKE + BUS ONLY
+
+    fast_atom = And(Atom(4, threshold=2.0, lte=False), Atom(4, threshold=8.0, lte=True))
+    slow_atom = And(Atom(4, threshold=0.1, lte=False), Atom(4, threshold=0.3, lte=True)) # neighbors slow
+
+    surround_slow = Surround(
+        left_child=slow_atom,
+        right_child=fast_atom,
+        d2=d_sur,
+        distance_function="Euclid",
+        left_labels=veh_like,
+        right_labels=veh_like,
+        all_labels=list(range(10)),      
+    )
+
+    prop = Eventually(surround_slow, unbound=True)
+
+    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]   # [N,T]
+    print(f"vals min: {vals.min()} max: {vals.max()}")
+    alpha = 20.0
+    robustness = (1.0 / alpha) * torch.logsumexp(alpha * vals.reshape(-1), dim=0)
+    return robustness
 
 
 
@@ -1445,40 +1515,6 @@ def evaluate_unsafe_lanechange_mask(
 
 
 
-def meaningful_reach(full_world, mask_eval, eval_idx, node_types):
-    traj = su.reshape_trajectories(full_world, node_types)  # [1,N,6,T]
-
-    veh_labels = [0, 4]
-    ped_labels = [1, 2]
-
-    ped_zone = Atom(4, 0.0, lte=False, labels=ped_labels)
-    slow_veh = Atom(4, 1.0, lte=True,  labels=veh_labels)
-
-    reach = Reach(
-        left_child=slow_veh,
-        right_child=ped_zone,
-        d1=0.0, d2=12.0,
-        left_label=veh_labels,
-        right_label=ped_labels,
-        distance_function="Euclid"
-    )
-
-    prop = Eventually(reach, right_time_bound=traj.shape[-1] - 1)
-    vals = prop.quantitative(traj, normalize=True).squeeze(2)[0]  # [N, T’]
-
-    # ⚠ KEY FIX: USE FLOAT MASK – NOT BOOL!
-    vals, mask_eval = su.align_temporal_dimensions(vals, mask_eval)   # vals [N,T’], mask_eval [N_pred,T’,1]
-    full_mask = torch.zeros_like(vals)                                # float, keeps gradient path safe
-    full_mask[eval_idx] = mask_eval.squeeze(-1).float()               # use float!
-
-    # final selection MUST use multiplication, not indexing!
-    selected = vals * full_mask                                       # <–– differentiable
-    if selected.abs().sum() == 0:                                     # safe check
-        return torch.zeros(1, device=full_world.device, requires_grad=True)
-
-    alpha = 20.0
-    robustness = -(1/alpha) * torch.logsumexp(-alpha * selected.reshape(-1), dim=0)
-    return robustness  # <- this is a TENSOR with gradient attached!
 
 
 
@@ -1488,67 +1524,3 @@ def meaningful_reach(full_world, mask_eval, eval_idx, node_types):
 
 
 
-################################################
-#DEBUGGING PROPERTIES
-################################################
-
-def evaluate_min_vehicle_speed(full_world, node_types, selected_labels=[0], alpha=20.0):
-    """
-    Debugging objective:
-    - Build trajectories using reshape_trajectories
-    - Select agents with types in selected_labels
-    - Extract their speeds |v|
-    - Return logsumexp(-|v|) so that LOWER speed → HIGHER objective
-    """
-
-    # ---- 1. Build trajectory tensor exactly like STREL expects ----
-    traj = su.reshape_trajectories(full_world, node_types)  # [1, N, 6, T]
-
-    device = traj.device
-    _, N, _, T = traj.shape
-
-
-    speeds = traj[0, :, 4, :]     # [N, T]
-    labels = traj[0, :, 5, 0]     # [N]  (node type is constant over time)
-
-    # ---- 2. Build mask for selected agent types ----
-    mask = torch.zeros(N, dtype=torch.bool, device=device)
-    for lab in selected_labels:
-        mask |= (labels == float(lab))  # stored as float
-
-    if mask.sum() == 0:
-        print("[WARNING] No agents match selected_labels", selected_labels)
-        return torch.tensor(0.0, device=device, requires_grad=True)
-
-    # ---- 3. Select only chosen agents ----
-    speeds_selected = speeds[mask]      # [N_sel, T]
-
-    # Flatten into [N_sel*T]
-    speeds_flat = speeds_selected.reshape(-1)
-
-    # ---- 4. Objective: encourage slower vehicles
-    # logsumexp(-|v|) creates strong gradients & is smooth
-    objective = (1/alpha) * torch.logsumexp(-alpha * speeds_flat, dim=0)
-
-    return objective
-
-
-def test_grad_minimize_movement_with_reshape(full_world, node_types):
-    """
-    Same idea as above, but uses your reshape_trajectories() function.
-    This tests the full preprocessing pipeline.
-    """
-
-    traj = su.reshape_trajectories(full_world, node_types)
-    # traj shape: [1,N,6,T]
-    pos = traj[0, :, 0:2, :]  # [N,2,T]
-
-    disp = pos[:, :, 1:] - pos[:, :, :-1]  # [N,2,T-1]
-    movement_cost = (disp ** 2).sum()
-
-    movement_cost
-
-
-    print("Movement cost:", movement_cost.item())
-
-    return -movement_cost

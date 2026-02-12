@@ -132,6 +132,62 @@ def deepcopy_preserve_tensors(obj):
 # --------------------------------
 
 
+# filter invalid fixed agents and return cleaned trajectories + mask of valid agents
+def clean_and_filter_agents(full_world):
+    """
+    full_world: [N, T, 2]
+
+    returns:
+      world_valid: [N_valid, T, 2]   (only valid agents, cleaned)
+      agent_mask:  [N]               (True = kept agent)
+    """
+    N, T, _ = full_world.shape
+    device = full_world.device
+
+    # 1) timestep validity mask
+    valid = (full_world.abs().sum(-1) != 0)  # [N, T]
+
+    # 2) agent-level validity
+    agent_mask = valid.any(dim=1)             # [N]
+
+    # 3) remove fully invalid agents
+    world = full_world[agent_mask]             # [N_valid, T, 2]
+    valid = valid[agent_mask]                  # [N_valid, T]
+
+    # early exit
+    if world.numel() == 0:
+        return world, agent_mask
+
+    Nv = world.shape[0]
+    time = torch.arange(T, device=device)
+
+    # 4) forward fill indices
+    last_valid = torch.where(
+        valid,
+        time.unsqueeze(0),
+        torch.full((Nv, T), -1, device=device)
+    )
+    last_valid = torch.cummax(last_valid, dim=1).values
+
+    # 5) backward fill indices
+    next_valid = torch.where(
+        valid,
+        time.unsqueeze(0),
+        torch.full((Nv, T), T, device=device)
+    )
+    next_valid = torch.cummin(next_valid.flip(1), dim=1).values.flip(1)
+
+    # 6) choose valid index per timestep
+    idx = torch.where(last_valid >= 0, last_valid, next_valid)
+    idx = idx.clamp(0, T - 1)
+
+    # 7) gather filled trajectories
+    idx = idx.unsqueeze(-1).expand(-1, -1, 2)
+    world_valid = torch.gather(world, dim=1, index=idx)
+
+    return world_valid, agent_mask
+
+
 class GuidedJointDiffusion(JointDiffusion):
 
     def __init__(self, *args, **kwargs):
@@ -391,6 +447,7 @@ class GuidedDiffNet(DiffNet):
                             return_pred_only=True,
                             exp_id = "",
                               return_types=False,
+                              filter_agents = True,
                               img_folder='visual',
                               sub_folder='opd_method'):
         """Runs diffusion from a latent and reconstructs trajectories."""
@@ -565,9 +622,9 @@ class GuidedDiffNet(DiffNet):
                       exp_id = exp_id, img_folder=img_folder, sub_folder=sub_folder
                 )
 
-            
+            types = self.decode_types_from_scenario(data, b_idx, return_pred=True)
             if return_types:
-                types = self.decode_types_from_scenario(data, b_idx, return_pred=True)
+            
                 return (rec_traj_world.squeeze(1) if num_samples==1 else rec_traj_world), types   # [N_eval, 60, 2], list[str]
             else:
                 return (rec_traj_world.squeeze(1) if num_samples==1 else rec_traj_world)   # [N_eval, 60, 2]
@@ -642,8 +699,29 @@ class GuidedDiffNet(DiffNet):
             # Return full world + scene-consistent pieces
             full_world = smooth_stop_poly(full_world, max_step=10.0)
 
+            types = self.decode_types_from_scenario(data, b_idx, return_pred=False)
+            if filter_agents:
+                
+                full_world, agent_mask = clean_and_filter_agents(full_world)
+                valid_types = types[agent_mask.to(types.device)]
+                orig_to_new = torch.full(
+                    (agent_mask.shape[0],),
+                    -1,
+                    device=agent_mask.device,
+                    dtype=torch.long
+                )
+
+                orig_to_new[agent_mask] = torch.arange(
+                    agent_mask.sum(),
+                    device=agent_mask.device
+                )
+
+                eval_mask = orig_to_new[eval_idx_scene]
+                
+                types = valid_types
+
             if return_types:
-                types = self.decode_types_from_scenario(data, b_idx, return_pred=False)
-                return full_world, rec_traj_scene, mask_eval_scene, eval_idx_scene, types
+                
+                return full_world, rec_traj_scene, mask_eval_scene, eval_mask, types
             else:
-                return full_world, rec_traj_scene, mask_eval_scene, eval_idx_scene
+                return full_world, rec_traj_scene, mask_eval_scene, eval_mask
