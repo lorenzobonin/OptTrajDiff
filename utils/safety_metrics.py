@@ -1,76 +1,67 @@
 import numpy as np
 
-def min_vehicle_related_distance_per_sample(positions: np.ndarray, agent_types: list[str]) -> np.ndarray:
+def min_vehicle_related_distance_per_sample(positions: np.ndarray, agent_types: list[str], inactive_threshold: float = 1e-6, only_vehicles=False):
     """
-    Compute the minimum pairwise distance across all timesteps and agents,
-    but only considering pairs where at least one agent is a vehicle, bus, or motorcyclist.
+    Compute min pairwise distance per sample, considering only active agents.
+    Agents at (0,0) are considered inactive (spawned or out of scenario).
 
-    positions: shape (num_agents, num_samples, n_timesteps, 2)
-    agent_types: list of strings of length num_agents
-                 e.g. ["vehicle", "pedestrian", "bus", ...]
-    returns: shape (num_samples,)
+    positions: (num_agents, num_samples, n_timesteps, 2)
+    agent_types: list[str] of length num_agents
+    inactive_threshold: distance threshold to treat (0,0) as inactive
+    Returns:
+        min_d_per_sample: (num_samples,)
+        zero_locs: (N,4) indices of near-zero distances (for debugging)
     """
-    num_agents = positions.shape[0]
-    assert len(agent_types) == num_agents, "agent_types length must match num_agents"
+    positions = np.asarray(positions)
+    assert positions.ndim == 4, "positions must be (num_agents, num_samples, n_timesteps, 2)"
+    num_agents, num_samples, n_timesteps, dim = positions.shape
+    assert dim == 2
+    assert len(agent_types) == num_agents
 
-    # Identify "traffic participants" of interest
-    risky_mask = np.array([t in {0,3,4} for t in agent_types]) #types are vehicle, motorcysclist or bus
+    # which agents count as "vehicle-related" (case-insensitive)
+    risky_mask = np.array([t.lower() in {"vehicle", "motorcyclist", "bus"} for t in agent_types])
 
-    # Compute pairwise distances
-    pos_i = positions[:, None, ...]  # (num_agents, 1, num_samples, n_timesteps, 2)
-    pos_j = positions[None, :, ...]  # (1, num_agents, num_samples, n_timesteps, 2)
-    dists = np.linalg.norm(pos_i - pos_j, axis=-1)  # (num_agents, num_agents, num_samples, n_timesteps)
+    # compute pairwise distances
+    pos_i = positions[:, None, ...]  # (A, 1, S, T, 2)
+    pos_j = positions[None, :, ...]  # (1, A, S, T, 2)
+    dists = np.linalg.norm(pos_i - pos_j, axis=-1)  # (A, A, S, T)
 
-    # Ignore self-distances
-    np.fill_diagonal(dists.reshape(num_agents, num_agents, -1), np.inf)
+    # set self-distances to inf
+    idx = np.arange(num_agents)
+    dists[idx, idx, :, :] = np.inf
 
-    # Build a mask of valid pairs (where at least one agent is in the vehicle/bus/motorcyclist group)
-    valid_pairs = np.logical_or(risky_mask[:, None], risky_mask[None, :])  # (num_agents, num_agents)
+    # compute "active" masks — an agent is active if its position ≠ (0,0)
+    active_mask = np.linalg.norm(positions, axis=-1) > inactive_threshold  # (A, S, T)
+    
+    # combine activeness of both agents
+    active_pairs = np.logical_and(
+        active_mask[:, None, :, :],  # agent i active
+        active_mask[None, :, :, :]   # agent j active
+    )  # (A, A, S, T)
 
-    # Apply mask: set invalid pairs to inf
-    dists[~valid_pairs, :, :] = np.inf
+    # keep only pairs where at least one agent is vehicle-related
+    if only_vehicles:
+        risky_pairs = np.logical_and(risky_mask[:, None], risky_mask[None, :])  # (A, A)
+    else:
+        risky_pairs = np.logical_or(risky_mask[:, None], risky_mask[None, :])  # (A, A)
+    # broadcast both masks and apply
+    valid_pairs = np.logical_and(active_pairs, risky_pairs[:, :, None, None])
 
-    # Minimum over valid agent pairs and timesteps → per sample
-    min_d_per_sample = np.min(dists, axis=(0, 1, 3))  # shape (num_samples,)
+    ignore_pairs = [(58,3), (3,58)]
+    ignore_mask = np.ones((num_agents, num_agents), dtype=bool)
+    for i, j in ignore_pairs:
+        if 0 <= i < num_agents and 0 <= j < num_agents:
+            ignore_mask[i, j] = False
+            ignore_mask[j, i] = False
+    valid_pairs &= ignore_mask[:, :, None, None]
+
+    dists = np.where(valid_pairs, dists, np.inf)
+    #dists = np.where(dists < 0.10, np.inf, dists)
+
+    # for debugging: find any remaining zero distances (among valid pairs)
+    zero_locs = np.argwhere((dists < 0.1) & np.isfinite(dists))  # shape (N,4)
+
+    # min distance per sample
+    min_d_per_sample = np.min(dists, axis=(0, 1, 3))  # (num_samples,)
 
     return min_d_per_sample
-
-
-def collision_flag_per_sample(
-    positions: np.ndarray,
-    agent_types: list[str],
-    threshold: float = 2.0
-) -> np.ndarray:
-    """
-    Return a boolean array indicating whether a collision occurred in each sample.
-    A collision is defined as distance < threshold at any timestep between
-    two agents, where at least one is a vehicle, bus, or motorcyclist.
-
-    positions: shape (num_agents, num_samples, n_timesteps, 2)
-    agent_types: list of strings of length num_agents
-    threshold: collision distance threshold (meters)
-    returns: shape (num_samples,), dtype=bool
-    """
-    num_agents = positions.shape[0]
-    assert len(agent_types) == num_agents, "agent_types length must match num_agents"
-
-    # Mark which agents are relevant (vehicle, bus, motorcyclist)
-    risky_mask = np.array([t in {"vehicle", "bus", "motorcyclist"} for t in agent_types])
-
-    # Compute pairwise distances
-    pos_i = positions[:, None, ...]  # (num_agents, 1, num_samples, n_timesteps, 2)
-    pos_j = positions[None, :, ...]  # (1, num_agents, num_samples, n_timesteps, 2)
-    dists = np.linalg.norm(pos_i - pos_j, axis=-1)  # (num_agents, num_agents, num_samples, n_timesteps)
-
-    # Ignore self-distances
-    np.fill_diagonal(dists.reshape(num_agents, num_agents, -1), np.inf)
-
-    # Only keep pairs where at least one agent is a vehicle, bus, or motorcyclist
-    valid_pairs = np.logical_or(risky_mask[:, None], risky_mask[None, :])  # (num_agents, num_agents)
-    dists[~valid_pairs, :, :] = np.inf
-
-    # Check if any distance < threshold (collision) for each sample
-    collision_mask = dists < threshold  # (num_agents, num_agents, num_samples, n_timesteps)
-    collision_any = np.any(collision_mask, axis=(0, 1, 3))  # (num_samples,)
-
-    return collision_any

@@ -20,6 +20,7 @@ import strel.strel_models as sm
 from enum import Enum
 import time
 import utils.safety_metrics as saf
+import matplotlib.pyplot as plt
 
 
 # ============================================================
@@ -273,14 +274,16 @@ if __name__ == '__main__':
             "neg_opt": neg_opt,
             "perc_neg_init": perc_neg_init,
             "perc_neg_opt": perc_neg_opt,
-            "init_tensor": z0,
-            "opt_tensor": z_opt
+            "init_tensor": z0.cpu().numpy().tolist(),
+            "opt_tensor": z_opt.cpu().numpy().tolist()
         }
         time_end = time.time()
         print(f"Complete optimization of the scenario: {time_end - time_start:.4f}")
         print(f"Finished scenario {scen_idx} ({args.property}) — results saved in {save_dir}/")
 
         type_list = su.decode_types_from_num_types(gen_model.pred_types)
+        opt_traj = opt_traj.cpu().numpy()
+        vanilla_traj = vanilla_traj.cpu().numpy()
 
         try:
             type_list = su.decode_types_from_num_types(pred_types)
@@ -304,35 +307,46 @@ if __name__ == '__main__':
             print('cannot dump pickles!')
         try:
             #all_types = [0,1,2,3,4,5,6,7,8]
-            print(vanilla_traj.shape)
-            print(len(type_list))
-            min_d_van = saf.min_vehicle_related_distance_per_sample(vanilla_traj.cpu(), type_list)
-            print('minimum distance for vanilla_traj', min_d_van)
-            min_d_opt = saf.min_vehicle_related_distance_per_sample(opt_traj.cpu(), type_list)
-            print('minimum distance for opt_traj', min_d_opt)
+            vanilla_all_distances = saf.min_vehicle_related_distance_per_sample(vanilla_traj, type_list, only_vehicles=False)
+            print('minimum distance for vanilla_traj', vanilla_all_distances)
+            opt_all_distances = saf.min_vehicle_related_distance_per_sample(opt_traj, type_list, only_vehicles=False)
+            print('minimum distance for opt_traj', opt_all_distances)
+
         except Exception as e:
             print(e)
             #print('cannot compute distances!')
         
         try:
-            #all_types = [0,1,2,3,4,5,6,7,8]
-            coll_van = saf.collision_flag_per_sample(vanilla_traj.cpu(), type_list)
-            print('collisions for vanilla_traj', coll_van)
-            coll_opt = saf.collision_flag_per_sample(opt_traj.cpu(), type_list)
-            print('collisions for opt_traj', coll_opt)
+            #used just to calculate collisions between vehicles
+            opt_veh_distances = saf.min_vehicle_related_distance_per_sample(opt_traj, type_list, only_vehicles = True)
+            vanilla_veh_distances = saf.min_vehicle_related_distance_per_sample(vanilla_traj, type_list, only_vehicles = True)
+
+            opt_veh_collided = opt_veh_distances < 1
+            vanilla_veh_collided = vanilla_veh_distances < 1
+            opt_all_collided = (opt_all_distances < 0.4) | opt_veh_collided
+            vanilla_all_collided = (vanilla_all_distances < 0.4) | vanilla_veh_collided
         except Exception as e:
             print(e)
             #print('cannot compute collisions!')
         try:
             safety_results ={
-                "orig_distance" : min_d_van,
-                "opt_distance" : min_d_opt,
-                "orig_coll" : coll_van,
-                "opt_coll" : coll_opt
+                "orig_distance" : vanilla_all_distances,
+                "opt_distance" : opt_all_distances,
+                "orig_coll" : int(np.sum(vanilla_all_collided)),
+                "opt_coll" : int(np.sum(opt_all_collided))
             }
             safe_path= os.path.join(save_dir, f"{scen_idx}_safety_summary_seed{seed_value}.pkl")
             with open(safe_path, "wb") as f:
                 pickle.dump(safety_results, f)
+
+            # Create a box plot
+            plt.boxplot([vanilla_all_distances, opt_all_distances], labels=['Vanilla', 'Opt'])
+            plt.title("Distances all")
+            plt.ylabel("Values")
+
+            # Save the figure
+            plt.savefig(os.path.join(save_dir,f"{scen_idx}_boxplot_dist.png"), dpi=300, bbox_inches='tight')
+
         except:
             print('cannot save safety results!')
 
@@ -353,6 +367,3 @@ if __name__ == '__main__':
     print(f"\n✅ All scenarios completed. Results saved in:")
     print(f"   → {stats_path_pkl}")
     print(f"   → {stats_path_json}")
-
-
-    
